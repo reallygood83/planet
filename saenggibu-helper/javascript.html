@@ -1,0 +1,4981 @@
+<script>
+// Global variables
+let currentPage = 'home';
+let currentGenerationParams = null;
+let evaluationsList = []; // 여러 평가를 저장하는 배열
+
+// Initialize the app when the page loads
+document.addEventListener('DOMContentLoaded', function() {
+  initializeApp();
+  setupEventListeners();
+  loadApiKeyStatus();
+  navigateToPage('home');
+});
+
+// Initialize app
+function initializeApp() {
+  google.script.run
+    .withSuccessHandler(function(result) {
+      if (result.success) {
+        document.getElementById('user-email').textContent = `이메일: ${result.userEmail}`;
+      }
+    })
+    .initializeApp();
+}
+
+// Setup event listeners
+function setupEventListeners() {
+  // Navigation
+  document.querySelectorAll('.nav-link').forEach(link => {
+    link.addEventListener('click', function(e) {
+      e.preventDefault();
+      const page = this.getAttribute('data-page');
+      navigateToPage(page);
+    });
+  });
+
+  // Generate form
+  const generateForm = document.getElementById('generate-form');
+  if (generateForm) {
+    generateForm.addEventListener('submit', handleGenerateSubmit);
+  }
+
+  // Record type change
+  const recordType = document.getElementById('record-type');
+  if (recordType) {
+    recordType.addEventListener('change', function() {
+      const subjectGroup = document.getElementById('subject-group');
+      const activityTypeGroup = document.getElementById('activity-type-group');
+      
+      if (this.value === '교과학습발달상황') {
+        subjectGroup.style.display = 'block';
+        activityTypeGroup.style.display = 'none';
+      } else if (this.value === '창의적체험활동') {
+        subjectGroup.style.display = 'none';
+        activityTypeGroup.style.display = 'block';
+      } else {
+        subjectGroup.style.display = 'none';
+        activityTypeGroup.style.display = 'none';
+      }
+    });
+  }
+
+  // Result editor input
+  const resultEditor = document.getElementById('result-editor');
+  if (resultEditor) {
+    resultEditor.addEventListener('input', updateCharacterCount);
+  }
+}
+
+// Navigation
+function navigateToPage(pageName) {
+  // Update active nav link
+  document.querySelectorAll('.nav-link').forEach(link => {
+    link.classList.remove('active');
+  });
+  document.querySelector(`[data-page="${pageName}"]`).classList.add('active');
+
+  // Update active page
+  document.querySelectorAll('.page').forEach(page => {
+    page.classList.remove('active');
+  });
+  document.getElementById(`${pageName}-page`).classList.add('active');
+
+  currentPage = pageName;
+
+  // Load page-specific data
+  switch(pageName) {
+    case 'evaluation-plan':
+      reloadEvaluationPlans();
+      break;
+    case 'class-management':
+      loadClassList();
+      break;
+    case 'survey':
+      loadEvaluationPlansForSurvey();
+      loadUserForms();
+      break;
+    case 'generate':
+      loadEvaluationPlansForSelect();
+      break;
+    case 'history':
+      loadHistory();
+      break;
+  }
+}
+
+// API Key Management
+function loadApiKeyStatus() {
+  google.script.run
+    .withSuccessHandler(function(result) {
+      const statusElement = document.getElementById('api-status');
+      if (result.hasKey && result.isValid) {
+        statusElement.className = 'api-status success';
+        statusElement.innerHTML = '<i class="material-icons">check_circle</i><span>API 키가 설정되었습니다.</span>';
+      } else if (result.hasKey) {
+        statusElement.className = 'api-status error';
+        statusElement.innerHTML = '<i class="material-icons">error</i><span>API 키가 유효하지 않습니다.</span>';
+      } else {
+        statusElement.className = 'api-status error';
+        statusElement.innerHTML = '<i class="material-icons">warning</i><span>API 키를 설정해주세요.</span>';
+      }
+    })
+    .getUserApiKeyStatus();
+}
+
+function saveApiKey() {
+  const apiKey = document.getElementById('api-key').value.trim();
+  if (!apiKey) {
+    showMessage('API 키를 입력해주세요.', 'error');
+    return;
+  }
+
+  showLoading('API 키 저장 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage(result.message, 'success');
+        document.getElementById('api-key').value = '';
+        loadApiKeyStatus();
+      } else {
+        showMessage(result.message, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .setUserGeminiApiKey(apiKey);
+}
+
+// Evaluation Plan Management
+function showSmartPasteModal() {
+  document.getElementById('smart-paste-modal').classList.add('active');
+}
+
+function showTemplateModal() {
+  // Clear form and reset evaluation list
+  clearTemplateForm();
+  
+  // Initialize with one empty evaluation
+  addNewEvaluation();
+  
+  document.getElementById('template-modal').classList.add('active');
+}
+
+function closeModal(modalId) {
+  document.getElementById(modalId).classList.remove('active');
+  
+  // Clear template form when closing template modal
+  if (modalId === 'template-modal') {
+    clearTemplateForm();
+  }
+  
+  // Clear smart paste content when closing
+  if (modalId === 'smart-paste-modal') {
+    document.getElementById('paste-content').value = '';
+    document.getElementById('analysis-subject').value = '';
+    removeFile();
+    // Reset to paste tab
+    currentTab = 'paste';
+    document.querySelectorAll('.tab-button').forEach(btn => {
+      btn.classList.remove('active');
+    });
+    document.querySelector('.tab-button').classList.add('active');
+    document.getElementById('paste-tab').style.display = 'block';
+    document.getElementById('upload-tab').style.display = 'none';
+  }
+}
+
+// Global variables for file upload
+let uploadedFileContent = null;
+let currentTab = 'paste';
+
+// Switch tabs
+function switchTab(tab) {
+  currentTab = tab;
+  
+  // Update tab buttons
+  document.querySelectorAll('.tab-button').forEach(btn => {
+    btn.classList.remove('active');
+  });
+  event.target.classList.add('active');
+  
+  // Update tab content
+  if (tab === 'paste') {
+    document.getElementById('paste-tab').style.display = 'block';
+    document.getElementById('upload-tab').style.display = 'none';
+  } else {
+    document.getElementById('paste-tab').style.display = 'none';
+    document.getElementById('upload-tab').style.display = 'block';
+  }
+}
+
+// Handle file selection
+function handleFileSelect(input) {
+  const file = input.files[0];
+  if (!file) return;
+  
+  const validTypes = ['text/plain', 'application/pdf', 
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/msword'];
+  
+  // Check file type
+  const isValidType = validTypes.includes(file.type) || 
+    file.name.endsWith('.txt') || file.name.endsWith('.pdf') || 
+    file.name.endsWith('.docx') || file.name.endsWith('.doc') || 
+    file.name.endsWith('.hwp');
+  
+  if (!isValidType) {
+    showMessage('지원하지 않는 파일 형식입니다.', 'error');
+    input.value = '';
+    return;
+  }
+  
+  // Show file info
+  document.getElementById('file-name').textContent = file.name;
+  document.getElementById('file-info').style.display = 'block';
+  document.querySelector('.upload-prompt').style.display = 'none';
+  
+  // Read file content
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+      uploadedFileContent = e.target.result;
+    } else {
+      // For other file types, we'll send to server for processing
+      const base64Data = e.target.result.split(',')[1];
+      processFileOnServer(base64Data, file.name, file.type);
+    }
+  };
+  
+  if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+    reader.readAsText(file);
+  } else {
+    reader.readAsDataURL(file);
+  }
+}
+
+// Process file on server
+function processFileOnServer(base64Data, fileName, mimeType) {
+  showLoading('파일을 처리하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        uploadedFileContent = result.content;
+        showMessage('파일이 성공적으로 로드되었습니다.', 'success');
+      } else {
+        showMessage('파일 처리 중 오류: ' + result.error, 'error');
+        removeFile();
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      handleError(error);
+      removeFile();
+    })
+    .processUploadedFile(base64Data, fileName, mimeType);
+}
+
+// Remove file
+function removeFile() {
+  document.getElementById('file-input').value = '';
+  document.getElementById('file-info').style.display = 'none';
+  document.querySelector('.upload-prompt').style.display = 'block';
+  uploadedFileContent = null;
+}
+
+function analyzeEvaluationPlan() {
+  // Get content based on current tab
+  let content = '';
+  if (currentTab === 'paste') {
+    content = document.getElementById('paste-content').value.trim();
+  } else {
+    content = uploadedFileContent;
+  }
+  
+  if (!content) {
+    showMessage('분석할 내용이 없습니다. 텍스트를 붙여넣거나 파일을 업로드해주세요.', 'error');
+    return;
+  }
+  
+  // Get selected subject
+  const subject = document.getElementById('analysis-subject').value;
+
+  showLoading('AI가 평가계획서를 분석하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        // Show analyzed data in template modal
+        fillTemplateWithAnalyzedData(result.data);
+        closeModal('smart-paste-modal');
+        showTemplateModal();
+        showMessage('분석이 완료되었습니다. 내용을 확인해주세요.', 'success');
+      } else {
+        showMessage('분석 중 오류가 발생했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .analyzeEvaluationPlan(content, subject);
+}
+
+function fillTemplateWithAnalyzedData(data) {
+  if (data.subject) document.getElementById('template-subject').value = data.subject;
+  if (data.grade) document.getElementById('template-grade').value = data.grade;
+  if (data.semester) document.getElementById('template-semester').value = data.semester;
+  
+  // Clear existing evaluations
+  evaluationsList = [];
+  document.getElementById('evaluations-list').innerHTML = '';
+  
+  // Check if data has evaluations array
+  if (data.evaluations && Array.isArray(data.evaluations)) {
+    // New format with multiple evaluations
+    data.evaluations.forEach((evalData, index) => {
+      const evaluation = {
+        id: generateId(),
+        evaluationName: evalData.evaluationName || `평가 ${index + 1}`,
+        unitName: evalData.unitName || '',
+        achievementStandards: evalData.achievementStandards || [],
+        evaluationCriteria: evalData.evaluationCriteria || {},
+        evaluationMethod: evalData.evaluationMethod || '',
+        evaluationPeriod: evalData.evaluationPeriod || ''
+      };
+      evaluationsList.push(evaluation);
+    });
+  } else {
+    // Legacy format - single evaluation
+    const evaluation = {
+      id: generateId(),
+      evaluationName: data.evaluationName || '평가 1',
+      unitName: data.unitName || '',
+      achievementStandards: data.achievementStandards || [],
+      evaluationCriteria: data.evaluationCriteria || {},
+      evaluationMethod: data.evaluationMethod || '',
+      evaluationPeriod: data.evaluationPeriod || ''
+    };
+    evaluationsList.push(evaluation);
+  }
+  
+  renderEvaluationsList();
+}
+
+// Generate unique ID
+function generateId() {
+  return Date.now().toString(36) + Math.random().toString(36).substr(2);
+}
+
+// Add new evaluation
+function addNewEvaluation() {
+  const evaluation = {
+    id: generateId(),
+    evaluationName: `평가 ${evaluationsList.length + 1}`,
+    unitName: '', // 단원명 추가
+    achievementStandards: [''],
+    evaluationCriteria: {
+      excellent: '',
+      good: '',
+      average: '',
+      needsImprovement: ''
+    },
+    evaluationMethod: '',
+    evaluationPeriod: ''
+  };
+  
+  evaluationsList.push(evaluation);
+  renderEvaluationsList();
+}
+
+// Delete evaluation
+function deleteEvaluation(evaluationId) {
+  evaluationsList = evaluationsList.filter(e => e.id !== evaluationId);
+  renderEvaluationsList();
+}
+
+// Add achievement standard to specific evaluation
+function addAchievementStandard(evaluationId) {
+  const evaluation = evaluationsList.find(e => e.id === evaluationId);
+  if (evaluation) {
+    evaluation.achievementStandards.push('');
+    renderEvaluationsList();
+  }
+}
+
+// Remove achievement standard
+function removeAchievementStandard(evaluationId, index) {
+  const evaluation = evaluationsList.find(e => e.id === evaluationId);
+  if (evaluation && evaluation.achievementStandards.length > 1) {
+    evaluation.achievementStandards.splice(index, 1);
+    renderEvaluationsList();
+  }
+}
+
+// Update evaluation field
+function updateEvaluationField(evaluationId, field, value) {
+  const evaluation = evaluationsList.find(e => e.id === evaluationId);
+  if (evaluation) {
+    if (field.includes('.')) {
+      const [parent, child] = field.split('.');
+      evaluation[parent][child] = value;
+    } else {
+      evaluation[field] = value;
+    }
+  }
+}
+
+// Update achievement standard
+function updateAchievementStandard(evaluationId, index, value) {
+  const evaluation = evaluationsList.find(e => e.id === evaluationId);
+  if (evaluation) {
+    evaluation.achievementStandards[index] = value;
+  }
+}
+
+// Render evaluations list
+function renderEvaluationsList() {
+  const container = document.getElementById('evaluations-list');
+  
+  if (evaluationsList.length === 0) {
+    container.innerHTML = '<p style="text-align: center; color: #5f6368;">평가를 추가하려면 아래 버튼을 클릭하세요.</p>';
+    return;
+  }
+  
+  container.innerHTML = evaluationsList.map(evaluation => `
+    <div class="evaluation-item" data-id="${evaluation.id}">
+      <div class="evaluation-item-header">
+        <input type="text" class="evaluation-item-title" value="${evaluation.evaluationName}" 
+          onchange="updateEvaluationField('${evaluation.id}', 'evaluationName', this.value)"
+          placeholder="평가 이름">
+        <div class="evaluation-item-actions">
+          <button type="button" class="btn-icon btn-delete" onclick="deleteEvaluation('${evaluation.id}')" title="삭제">
+            <i class="material-icons">delete</i>
+          </button>
+        </div>
+      </div>
+      
+      <div class="evaluation-fields">
+        <div class="form-group">
+          <label>단원명</label>
+          <input type="text" value="${evaluation.unitName || ''}" 
+            onchange="updateEvaluationField('${evaluation.id}', 'unitName', this.value)"
+            placeholder="예: 1. 수와 연산">
+        </div>
+        
+        <div class="achievement-standards-section">
+          <label>성취기준</label>
+          <div class="achievement-standards-list">
+            ${evaluation.achievementStandards.map((standard, index) => `
+              <div class="achievement-standard-item">
+                <input type="text" value="${standard}" 
+                  onchange="updateAchievementStandard('${evaluation.id}', ${index}, this.value)"
+                  placeholder="성취기준 ${index + 1}">
+                ${evaluation.achievementStandards.length > 1 ? `
+                  <button type="button" class="btn-icon" onclick="removeAchievementStandard('${evaluation.id}', ${index})" title="삭제">
+                    <i class="material-icons">remove</i>
+                  </button>
+                ` : ''}
+              </div>
+            `).join('')}
+          </div>
+          <button type="button" class="btn btn-small" onclick="addAchievementStandard('${evaluation.id}')">
+            <i class="material-icons">add</i>
+            성취기준 추가
+          </button>
+        </div>
+        
+        <div class="criteria-section">
+          <div class="criteria-field">
+            <label>매우잘함</label>
+            <textarea value="${evaluation.evaluationCriteria.excellent || ''}"
+              onchange="updateEvaluationField('${evaluation.id}', 'evaluationCriteria.excellent', this.value)"
+              placeholder="매우잘함 기준">${evaluation.evaluationCriteria.excellent || ''}</textarea>
+          </div>
+          <div class="criteria-field">
+            <label>잘함</label>
+            <textarea value="${evaluation.evaluationCriteria.good || ''}"
+              onchange="updateEvaluationField('${evaluation.id}', 'evaluationCriteria.good', this.value)"
+              placeholder="잘함 기준">${evaluation.evaluationCriteria.good || ''}</textarea>
+          </div>
+          <div class="criteria-field">
+            <label>보통</label>
+            <textarea value="${evaluation.evaluationCriteria.average || ''}"
+              onchange="updateEvaluationField('${evaluation.id}', 'evaluationCriteria.average', this.value)"
+              placeholder="보통 기준">${evaluation.evaluationCriteria.average || ''}</textarea>
+          </div>
+          <div class="criteria-field">
+            <label>노력요함</label>
+            <textarea value="${evaluation.evaluationCriteria.needsImprovement || ''}"
+              onchange="updateEvaluationField('${evaluation.id}', 'evaluationCriteria.needsImprovement', this.value)"
+              placeholder="노력요함 기준">${evaluation.evaluationCriteria.needsImprovement || ''}</textarea>
+          </div>
+        </div>
+        
+        <div class="form-group">
+          <label>평가방법</label>
+          <input type="text" value="${evaluation.evaluationMethod}" 
+            onchange="updateEvaluationField('${evaluation.id}', 'evaluationMethod', this.value)"
+            placeholder="예: 관찰평가, 실기평가">
+        </div>
+        
+        <div class="form-group">
+          <label>평가시기</label>
+          <input type="text" value="${evaluation.evaluationPeriod}" 
+            onchange="updateEvaluationField('${evaluation.id}', 'evaluationPeriod', this.value)"
+            placeholder="예: 3월~7월">
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function saveEvaluationPlanFromTemplate() {
+  const subject = document.getElementById('template-subject').value.trim();
+  const grade = document.getElementById('template-grade').value.trim();
+  const semester = document.getElementById('template-semester').value;
+
+  // Validate basic info
+  if (!subject || !grade) {
+    showMessage('과목과 학년을 입력해주세요.', 'error');
+    return;
+  }
+
+  // Validate evaluations
+  if (evaluationsList.length === 0) {
+    showMessage('최소 하나의 평가를 추가해주세요.', 'error');
+    return;
+  }
+
+  // Check each evaluation has at least one achievement standard
+  const invalidEvaluations = evaluationsList.filter(e => 
+    !e.evaluationName || 
+    e.achievementStandards.filter(s => s.trim()).length === 0
+  );
+
+  if (invalidEvaluations.length > 0) {
+    showMessage('모든 평가에는 평가 이름과 최소 하나의 성취기준이 필요합니다.', 'error');
+    return;
+  }
+
+  // Clean up empty achievement standards
+  evaluationsList.forEach(evaluation => {
+    evaluation.achievementStandards = evaluation.achievementStandards.filter(s => s.trim());
+  });
+
+  const evaluationData = {
+    subject: subject,
+    grade: grade,
+    semester: semester,
+    evaluations: evaluationsList
+  };
+
+  showLoading('평가계획 저장 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage('평가계획이 저장되었습니다.', 'success');
+        closeModal('template-modal');
+        clearTemplateForm();
+        // Force reload the evaluation plans page if we're on it
+        if (currentPage === 'evaluation-plan') {
+          setTimeout(() => {
+            reloadEvaluationPlans();
+          }, 500); // Small delay to ensure file is fully saved
+        }
+      } else {
+        showMessage('저장 중 오류가 발생했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .saveEvaluationPlan(evaluationData);
+}
+
+function clearTemplateForm() {
+  document.getElementById('template-form').reset();
+  evaluationsList = [];
+  document.getElementById('evaluations-list').innerHTML = '';
+}
+
+function loadEvaluationPlans() {
+  showLoading('평가계획 불러오는 중...');
+  
+  // Add cache busting
+  const timestamp = new Date().getTime();
+  
+  // 먼저 간단한 테스트로 통신 확인
+  google.script.run
+    .withSuccessHandler(function(testResult) {
+      console.log('Basic test result:', testResult);
+      
+      // 실제 평가계획 로드 - 직접 호출
+      google.script.run
+        .withSuccessHandler(function(plans) {
+          hideLoading();
+          console.log('Received plans:', plans);
+          console.log('Plans type:', typeof plans);
+          
+          // null을 빈 배열로 변환
+          if (plans === null || plans === undefined) {
+            console.log('Plans is null, converting to empty array');
+            plans = [];
+          }
+          
+          // 객체를 배열로 변환 시도
+          if (!Array.isArray(plans) && typeof plans === 'object' && plans !== null) {
+            console.log('Plans is object, trying to convert');
+            // plans 속성이 있으면 사용
+            if (plans.plans && Array.isArray(plans.plans)) {
+              plans = plans.plans;
+            } else if (plans.result && Array.isArray(plans.result)) {
+              plans = plans.result;
+            } else {
+              // 객체를 배열로 변환
+              plans = Object.values(plans);
+            }
+          }
+          
+          displayEvaluationPlans(plans);
+          
+          // If no plans found, show debug message
+          if (plans && plans.length === 0) {
+            showMessage('저장된 평가계획이 없습니다. Google Drive에서 "생기부 AI 도우미" 폴더를 확인해보세요.', 'info');
+          }
+        })
+        .withFailureHandler(function(error) {
+          hideLoading();
+          console.error('Failed to load evaluation plans:', error);
+          handleError(error);
+          
+          // Display error message to user
+          const container = document.getElementById('evaluation-plans-list');
+          container.innerHTML = `
+            <div class="empty-state">
+              <i class="material-icons">error_outline</i>
+              <p>평가계획을 불러오는 중 오류가 발생했습니다.</p>
+              <p style="font-size: 0.9rem; color: #666;">${error.toString()}</p>
+              <div style="margin-top: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center;">
+                <button class="btn btn-secondary" onclick="testBasicFunction()">
+                  <i class="material-icons">check</i>
+                  기본 테스트
+                </button>
+                <button class="btn btn-secondary" onclick="testEmptyArrayFunction()">
+                  <i class="material-icons">check</i>
+                  빈 배열 테스트
+                </button>
+                <button class="btn btn-secondary" onclick="testSimplePlans()">
+                  <i class="material-icons">check</i>
+                  단순 평가계획
+                </button>
+                <button class="btn btn-secondary" onclick="testHardcodedPlans()">
+                  <i class="material-icons">check</i>
+                  하드코딩 평가계획
+                </button>
+                <button class="btn btn-secondary" onclick="testFileSearch()">
+                  <i class="material-icons">search</i>
+                  파일 검색
+                </button>
+                <button class="btn btn-secondary" onclick="testJSONPlans()">
+                  <i class="material-icons">check</i>
+                  JSON 테스트
+                </button>
+              </div>
+            </div>
+          `;
+        })
+        .getEvaluationPlansWrapper();
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('Basic test failed:', error);
+      showMessage('기본 통신 테스트 실패: ' + error, 'error');
+    })
+    .testBasicReturn();
+}
+
+function displayEvaluationPlans(plans) {
+  const container = document.getElementById('evaluation-plans-list');
+  
+  // Handle null or undefined plans
+  if (!plans) {
+    console.error('Plans is null or undefined');
+    container.innerHTML = `
+      <div class="empty-state">
+        <i class="material-icons">error_outline</i>
+        <p>평가계획을 불러오는 중 오류가 발생했습니다.</p>
+        <button class="btn btn-primary" onclick="reloadEvaluationPlans()" style="margin-top: 1rem;">
+          <i class="material-icons">refresh</i>
+          다시 시도
+        </button>
+      </div>
+    `;
+    return;
+  }
+  
+  if (plans.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <i class="material-icons">folder_open</i>
+        <p>저장된 평가계획이 없습니다.</p>
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = plans.map(plan => {
+    // Calculate total achievement standards across all evaluations
+    let totalStandards = 0;
+    let evaluationCount = 0;
+    
+    if (plan.data.evaluations && Array.isArray(plan.data.evaluations)) {
+      evaluationCount = plan.data.evaluations.length;
+      totalStandards = plan.data.evaluations.reduce((sum, eval) => 
+        sum + (eval.achievementStandards ? eval.achievementStandards.length : 0), 0);
+    } else if (plan.data.achievementStandards) {
+      // Legacy format support
+      evaluationCount = 1;
+      totalStandards = plan.data.achievementStandards.length;
+    }
+    
+    return `
+      <div class="plan-card">
+        <div class="plan-content" onclick="viewEvaluationPlan('${plan.id}')">
+          <div class="plan-header">
+            <div class="plan-title">${plan.data.subject} - ${plan.data.grade}</div>
+            <div class="plan-date">${new Date(plan.modifiedDate).toLocaleDateString()}</div>
+          </div>
+          <div class="plan-details">
+            <p>${plan.data.semester} | 평가 ${evaluationCount}개 | 성취기준 ${totalStandards}개</p>
+          </div>
+        </div>
+        <div class="plan-actions">
+          <button class="btn-icon" onclick="editEvaluationPlan('${plan.id}')" title="수정">
+            <i class="material-icons">edit</i>
+          </button>
+          <button class="btn-icon btn-danger" onclick="deleteEvaluationPlan('${plan.id}')" title="삭제">
+            <i class="material-icons">delete</i>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function viewEvaluationPlan(planId) {
+  showLoading('평가계획을 불러오는 중...');
+  
+  // JSON 방식으로 평가계획 다시 로드
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      hideLoading();
+      try {
+        const plans = JSON.parse(jsonString || '[]');
+        const plan = plans.find(p => p.id === planId);
+        
+        if (plan) {
+          displayEvaluationPlanModal(plan);
+        } else {
+          showMessage('평가계획을 찾을 수 없습니다.', 'error');
+        }
+      } catch (error) {
+        console.error('JSON parse error:', error);
+        showMessage('평가계획 로드 오류', 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      handleError(error);
+    })
+    .getEvaluationPlansJSON();
+}
+
+// 평가계획 상세보기 모달 표시
+function displayEvaluationPlanModal(plan) {
+  // Create modal overlay
+  const modalOverlay = document.createElement('div');
+  modalOverlay.className = 'modal-overlay active';
+  modalOverlay.id = 'evaluation-plan-modal';
+  
+  // Create modal content
+  const modalContent = document.createElement('div');
+  modalContent.className = 'modal-content modal-large';
+  
+  // Build evaluations HTML
+  let evaluationsHTML = '';
+  if (plan.data.evaluations && Array.isArray(plan.data.evaluations)) {
+    evaluationsHTML = plan.data.evaluations.map((evaluation, index) => `
+      <div class="evaluation-detail-item">
+        <h4>${evaluation.evaluationName}${evaluation.unitName ? ` - ${evaluation.unitName}` : ''}</h4>
+        
+        <div class="detail-section">
+          <h5>성취기준</h5>
+          <ul>
+            ${evaluation.achievementStandards.map(std => `<li>${std}</li>`).join('')}
+          </ul>
+        </div>
+        
+        <div class="detail-section">
+          <h5>평가기준</h5>
+          <div class="criteria-grid">
+            ${evaluation.evaluationCriteria.excellent ? `
+              <div class="criteria-item">
+                <strong>매우잘함</strong>
+                <p>${evaluation.evaluationCriteria.excellent}</p>
+              </div>
+            ` : ''}
+            ${evaluation.evaluationCriteria.good ? `
+              <div class="criteria-item">
+                <strong>잘함</strong>
+                <p>${evaluation.evaluationCriteria.good}</p>
+              </div>
+            ` : ''}
+            ${evaluation.evaluationCriteria.average ? `
+              <div class="criteria-item">
+                <strong>보통</strong>
+                <p>${evaluation.evaluationCriteria.average}</p>
+              </div>
+            ` : ''}
+            ${evaluation.evaluationCriteria.needsImprovement ? `
+              <div class="criteria-item">
+                <strong>노력요함</strong>
+                <p>${evaluation.evaluationCriteria.needsImprovement}</p>
+              </div>
+            ` : ''}
+          </div>
+        </div>
+        
+        ${evaluation.evaluationMethod ? `
+          <div class="detail-section">
+            <h5>평가방법</h5>
+            <p>${evaluation.evaluationMethod}</p>
+          </div>
+        ` : ''}
+        
+        ${evaluation.evaluationPeriod ? `
+          <div class="detail-section">
+            <h5>평가시기</h5>
+            <p>${evaluation.evaluationPeriod}</p>
+          </div>
+        ` : ''}
+      </div>
+    `).join('<hr>');
+  }
+  
+  // Modal HTML
+  modalContent.innerHTML = `
+    <div class="modal-header">
+      <h2>${plan.data.subject} - ${plan.data.grade} ${plan.data.semester}</h2>
+      <button class="btn-icon" onclick="closeEvaluationPlanModal()">
+        <i class="material-icons">close</i>
+      </button>
+    </div>
+    
+    <div class="modal-body">
+      <div class="plan-info-header">
+        <p><strong>파일명:</strong> ${plan.name}</p>
+        <p><strong>최종 수정:</strong> ${new Date(plan.modifiedDate).toLocaleString()}</p>
+      </div>
+      
+      <div class="evaluations-detail">
+        ${evaluationsHTML}
+      </div>
+    </div>
+    
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeEvaluationPlanModal()">닫기</button>
+      <button class="btn btn-primary" onclick="editEvaluationPlan('${plan.id}')">
+        <i class="material-icons">edit</i>
+        수정
+      </button>
+      <button class="btn btn-danger" onclick="confirmDeleteEvaluationPlan('${plan.id}', '${plan.data.subject} - ${plan.data.grade}')">
+        <i class="material-icons">delete</i>
+        삭제
+      </button>
+    </div>
+  `;
+  
+  modalOverlay.appendChild(modalContent);
+  document.body.appendChild(modalOverlay);
+}
+
+// 평가계획 모달 닫기
+function closeEvaluationPlanModal() {
+  const modal = document.getElementById('evaluation-plan-modal');
+  if (modal) {
+    modal.remove();
+  }
+}
+
+// 평가계획 수정 (아직 미구현)
+function editEvaluationPlan(planId) {
+  showMessage('평가계획 수정 기능은 준비 중입니다.', 'info');
+  closeEvaluationPlanModal();
+}
+
+// 평가계획 삭제 확인
+function confirmDeleteEvaluationPlan(planId, planName) {
+  if (confirm(`정말로 "${planName}" 평가계획을 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.`)) {
+    deleteEvaluationPlan(planId);
+  }
+}
+
+// 평가계획 삭제
+function deleteEvaluationPlan(planId) {
+  showLoading('평가계획을 삭제하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      hideLoading();
+      try {
+        const result = JSON.parse(jsonString);
+        if (result.success) {
+          showMessage(result.message || '평가계획이 삭제되었습니다.', 'success');
+          closeEvaluationPlanModal();
+          reloadEvaluationPlans(); // 목록 새로고침
+        } else {
+          showMessage('삭제 실패: ' + result.error, 'error');
+        }
+      } catch (error) {
+        console.error('JSON parse error:', error);
+        showMessage('삭제 처리 중 오류가 발생했습니다.', 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      handleError(error);
+    })
+    .deleteEvaluationPlanJSON(planId);
+}
+
+// Edit evaluation plan function
+function editEvaluationPlan(planId) {
+  showLoading('평가계획을 불러오는 중...');
+  
+  // Load the specific plan
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      hideLoading();
+      try {
+        const plans = JSON.parse(jsonString || '[]');
+        const plan = plans.find(p => p.id === planId);
+        
+        if (plan) {
+          displayEditEvaluationPlanModal(plan);
+        } else {
+          showMessage('평가계획을 찾을 수 없습니다.', 'error');
+        }
+      } catch (error) {
+        console.error('JSON parse error:', error);
+        showMessage('평가계획 로드 오류', 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      handleError(error);
+    })
+    .getEvaluationPlansJSON();
+}
+
+// Display edit modal for evaluation plan
+function displayEditEvaluationPlanModal(plan) {
+  // Create modal overlay
+  const modalOverlay = document.createElement('div');
+  modalOverlay.className = 'modal-overlay active';
+  modalOverlay.id = 'edit-evaluation-plan-modal';
+  
+  // Create modal content
+  const modalContent = document.createElement('div');
+  modalContent.className = 'modal-content modal-large';
+  
+  modalContent.innerHTML = `
+    <div class="modal-header">
+      <h2>평가계획 수정</h2>
+      <button class="modal-close" onclick="closeEditEvaluationPlanModal()">
+        <i class="material-icons">close</i>
+      </button>
+    </div>
+    
+    <div class="modal-body">
+      <form id="edit-evaluation-form">
+        <div class="form-row">
+          <div class="form-group">
+            <label>학년</label>
+            <select id="edit-grade" required>
+              <option value="">선택하세요</option>
+              <option value="1학년" ${plan.data.grade === '1학년' ? 'selected' : ''}>1학년</option>
+              <option value="2학년" ${plan.data.grade === '2학년' ? 'selected' : ''}>2학년</option>
+              <option value="3학년" ${plan.data.grade === '3학년' ? 'selected' : ''}>3학년</option>
+              <option value="4학년" ${plan.data.grade === '4학년' ? 'selected' : ''}>4학년</option>
+              <option value="5학년" ${plan.data.grade === '5학년' ? 'selected' : ''}>5학년</option>
+              <option value="6학년" ${plan.data.grade === '6학년' ? 'selected' : ''}>6학년</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label>학기</label>
+            <select id="edit-semester" required>
+              <option value="">선택하세요</option>
+              <option value="1학기" ${plan.data.semester === '1학기' ? 'selected' : ''}>1학기</option>
+              <option value="2학기" ${plan.data.semester === '2학기' ? 'selected' : ''}>2학기</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label>과목</label>
+            <select id="edit-subject" required>
+              <option value="">선택하세요</option>
+              <option value="국어" ${plan.data.subject === '국어' ? 'selected' : ''}>국어</option>
+              <option value="수학" ${plan.data.subject === '수학' ? 'selected' : ''}>수학</option>
+              <option value="사회" ${plan.data.subject === '사회' ? 'selected' : ''}>사회</option>
+              <option value="과학" ${plan.data.subject === '과학' ? 'selected' : ''}>과학</option>
+              <option value="영어" ${plan.data.subject === '영어' ? 'selected' : ''}>영어</option>
+              <option value="도덕" ${plan.data.subject === '도덕' ? 'selected' : ''}>도덕</option>
+              <option value="실과" ${plan.data.subject === '실과' ? 'selected' : ''}>실과</option>
+              <option value="체육" ${plan.data.subject === '체육' ? 'selected' : ''}>체육</option>
+              <option value="음악" ${plan.data.subject === '음악' ? 'selected' : ''}>음악</option>
+              <option value="미술" ${plan.data.subject === '미술' ? 'selected' : ''}>미술</option>
+            </select>
+          </div>
+        </div>
+        
+        <div class="evaluations-container">
+          <h3>평가 항목</h3>
+          <div id="edit-evaluations-list">
+            ${plan.data.evaluations && plan.data.evaluations.length > 0 
+              ? plan.data.evaluations.map((evaluation, index) => createEditEvaluationItem(evaluation, index)).join('')
+              : createEditEvaluationItem({}, 0)
+            }
+          </div>
+          <button type="button" class="btn btn-secondary" onclick="addEditEvaluationItem()">
+            <i class="material-icons">add</i>
+            평가 항목 추가
+          </button>
+        </div>
+      </form>
+    </div>
+    
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeEditEvaluationPlanModal()">취소</button>
+      <button class="btn btn-primary" onclick="saveEditedEvaluationPlan('${plan.id}')">
+        <i class="material-icons">save</i>
+        저장
+      </button>
+    </div>
+  `;
+  
+  modalOverlay.appendChild(modalContent);
+  document.body.appendChild(modalOverlay);
+}
+
+// Create edit evaluation item HTML
+function createEditEvaluationItem(evaluation, index) {
+  return `
+    <div class="evaluation-item" data-index="${index}">
+      <div class="evaluation-item-header">
+        <span class="evaluation-item-title">평가 ${index + 1}</span>
+        <div class="evaluation-item-actions">
+          <button type="button" class="btn-icon btn-delete" onclick="removeEditEvaluationItem(this)">
+            <i class="material-icons">delete</i>
+          </button>
+        </div>
+      </div>
+      
+      <div class="evaluation-fields">
+        <div class="form-row">
+          <div class="form-group">
+            <label>평가명</label>
+            <input type="text" 
+              name="evaluationName_${index}" 
+              value="${evaluation.evaluationName || ''}"
+              placeholder="예: 1학기 수행평가"
+              required>
+          </div>
+          
+          <div class="form-group">
+            <label>단원명</label>
+            <input type="text" 
+              name="unitName_${index}" 
+              value="${evaluation.unitName || ''}"
+              placeholder="예: 1. 글자와 소리">
+          </div>
+        </div>
+        
+        <div class="form-group">
+          <label>평가방법</label>
+          <input type="text" 
+            name="evaluationMethod_${index}" 
+            value="${evaluation.evaluationMethod || ''}"
+            placeholder="예: 서술형 평가, 프로젝트">
+        </div>
+        
+        <div class="form-group">
+          <label>평가시기</label>
+          <input type="text" 
+            name="evaluationPeriod_${index}" 
+            value="${evaluation.evaluationPeriod || ''}"
+            placeholder="예: 3월 2주">
+        </div>
+        
+        <div class="achievement-standards-section">
+          <label>성취기준</label>
+          <div class="achievement-standards-list" id="standards-list-${index}">
+            ${evaluation.achievementStandards && evaluation.achievementStandards.length > 0
+              ? evaluation.achievementStandards.map((standard, sIndex) => `
+                  <div class="achievement-standard-item">
+                    <input type="text" 
+                      name="standard_${index}_${sIndex}" 
+                      value="${standard}"
+                      placeholder="성취기준 입력"
+                      required>
+                    <button type="button" class="btn-icon btn-delete" onclick="removeEditStandard(this)">
+                      <i class="material-icons">remove</i>
+                    </button>
+                  </div>
+                `).join('')
+              : `
+                  <div class="achievement-standard-item">
+                    <input type="text" 
+                      name="standard_${index}_0" 
+                      placeholder="성취기준 입력"
+                      required>
+                    <button type="button" class="btn-icon btn-delete" onclick="removeEditStandard(this)">
+                      <i class="material-icons">remove</i>
+                    </button>
+                  </div>
+                `
+            }
+          </div>
+          <button type="button" class="btn btn-small" onclick="addEditStandard(${index})">
+            <i class="material-icons">add</i>
+            성취기준 추가
+          </button>
+        </div>
+        
+        <div class="form-group">
+          <label>평가기준</label>
+          <div class="criteria-section">
+            <div class="criteria-field">
+              <label>매우잘함</label>
+              <textarea name="excellent_${index}" rows="2">${evaluation.evaluationCriteria?.excellent || ''}</textarea>
+            </div>
+            <div class="criteria-field">
+              <label>잘함</label>
+              <textarea name="good_${index}" rows="2">${evaluation.evaluationCriteria?.good || ''}</textarea>
+            </div>
+            <div class="criteria-field">
+              <label>보통</label>
+              <textarea name="average_${index}" rows="2">${evaluation.evaluationCriteria?.average || ''}</textarea>
+            </div>
+            <div class="criteria-field">
+              <label>노력요함</label>
+              <textarea name="needsImprovement_${index}" rows="2">${evaluation.evaluationCriteria?.needsImprovement || ''}</textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Add evaluation item in edit modal
+function addEditEvaluationItem() {
+  const container = document.getElementById('edit-evaluations-list');
+  const currentItems = container.querySelectorAll('.evaluation-item').length;
+  const newItem = createEditEvaluationItem({}, currentItems);
+  container.insertAdjacentHTML('beforeend', newItem);
+}
+
+// Remove evaluation item in edit modal
+function removeEditEvaluationItem(button) {
+  const item = button.closest('.evaluation-item');
+  const container = document.getElementById('edit-evaluations-list');
+  
+  if (container.querySelectorAll('.evaluation-item').length > 1) {
+    item.remove();
+    // Re-index items
+    reindexEditEvaluationItems();
+  } else {
+    showMessage('최소 1개의 평가 항목이 필요합니다.', 'warning');
+  }
+}
+
+// Add achievement standard in edit modal
+function addEditStandard(evaluationIndex) {
+  const container = document.getElementById(`standards-list-${evaluationIndex}`);
+  const currentStandards = container.querySelectorAll('.achievement-standard-item').length;
+  
+  const newStandard = document.createElement('div');
+  newStandard.className = 'achievement-standard-item';
+  newStandard.innerHTML = `
+    <input type="text" 
+      name="standard_${evaluationIndex}_${currentStandards}" 
+      placeholder="성취기준 입력"
+      required>
+    <button type="button" class="btn-icon btn-delete" onclick="removeEditStandard(this)">
+      <i class="material-icons">remove</i>
+    </button>
+  `;
+  
+  container.appendChild(newStandard);
+}
+
+// Remove achievement standard in edit modal
+function removeEditStandard(button) {
+  const item = button.closest('.achievement-standard-item');
+  const container = item.parentElement;
+  
+  if (container.querySelectorAll('.achievement-standard-item').length > 1) {
+    item.remove();
+  } else {
+    showMessage('최소 1개의 성취기준이 필요합니다.', 'warning');
+  }
+}
+
+// Re-index evaluation items after removal
+function reindexEditEvaluationItems() {
+  const items = document.querySelectorAll('#edit-evaluations-list .evaluation-item');
+  items.forEach((item, index) => {
+    item.setAttribute('data-index', index);
+    item.querySelector('.evaluation-item-title').textContent = `평가 ${index + 1}`;
+    
+    // Update all input names
+    item.querySelectorAll('input, textarea').forEach(input => {
+      const name = input.getAttribute('name');
+      if (name) {
+        // Update index in name attribute
+        const nameParts = name.split('_');
+        if (nameParts.length > 1) {
+          nameParts[1] = index;
+          input.setAttribute('name', nameParts.join('_'));
+        }
+      }
+    });
+    
+    // Update standards list ID and add button
+    const standardsList = item.querySelector('.achievement-standards-list');
+    if (standardsList) {
+      standardsList.id = `standards-list-${index}`;
+    }
+    
+    const addStandardBtn = item.querySelector('.achievement-standards-section button');
+    if (addStandardBtn) {
+      addStandardBtn.setAttribute('onclick', `addEditStandard(${index})`);
+    }
+  });
+}
+
+// Save edited evaluation plan
+function saveEditedEvaluationPlan(planId) {
+  const form = document.getElementById('edit-evaluation-form');
+  
+  // Validate form
+  if (!form.checkValidity()) {
+    form.reportValidity();
+    return;
+  }
+  
+  // Collect form data
+  const planData = {
+    grade: document.getElementById('edit-grade').value,
+    semester: document.getElementById('edit-semester').value,
+    subject: document.getElementById('edit-subject').value,
+    evaluations: []
+  };
+  
+  // Collect evaluations
+  const evaluationItems = document.querySelectorAll('#edit-evaluations-list .evaluation-item');
+  evaluationItems.forEach((item, index) => {
+    const evaluation = {
+      evaluationName: item.querySelector(`[name="evaluationName_${index}"]`).value,
+      unitName: item.querySelector(`[name="unitName_${index}"]`).value,
+      evaluationMethod: item.querySelector(`[name="evaluationMethod_${index}"]`).value,
+      evaluationPeriod: item.querySelector(`[name="evaluationPeriod_${index}"]`).value,
+      achievementStandards: [],
+      evaluationCriteria: {
+        excellent: item.querySelector(`[name="excellent_${index}"]`).value,
+        good: item.querySelector(`[name="good_${index}"]`).value,
+        average: item.querySelector(`[name="average_${index}"]`).value,
+        needsImprovement: item.querySelector(`[name="needsImprovement_${index}"]`).value
+      }
+    };
+    
+    // Collect achievement standards
+    const standardInputs = item.querySelectorAll(`[name^="standard_${index}_"]`);
+    standardInputs.forEach(input => {
+      if (input.value.trim()) {
+        evaluation.achievementStandards.push(input.value.trim());
+      }
+    });
+    
+    planData.evaluations.push(evaluation);
+  });
+  
+  showLoading('평가계획을 저장하는 중...');
+  
+  // Save to server
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage('평가계획이 수정되었습니다.', 'success');
+        closeEditEvaluationPlanModal();
+        reloadEvaluationPlans();
+      } else {
+        showMessage('저장 실패: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      handleError(error);
+    })
+    .updateEvaluationPlan(planId, planData);
+}
+
+// Close edit modal
+function closeEditEvaluationPlanModal() {
+  const modal = document.getElementById('edit-evaluation-plan-modal');
+  if (modal) {
+    modal.remove();
+  }
+}
+
+// Debug function to check folders
+function debugFolders() {
+  showLoading('폴더 정보 확인 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        const info = result.info;
+        const message = `
+          <div style="text-align: left; padding: 1rem;">
+            <h3>폴더 정보</h3>
+            <p><strong>메인 폴더:</strong><br>
+               <a href="${info.mainFolderUrl}" target="_blank">${info.mainFolderUrl}</a></p>
+            <p><strong>평가계획 폴더:</strong><br>
+               <a href="${info.evaluationFolderUrl}" target="_blank">${info.evaluationFolderUrl}</a></p>
+            <p><strong>폴더 ID:</strong></p>
+            <ul>
+              <li>메인: ${info.mainFolderId}</li>
+              <li>평가계획: ${info.evaluationFolderId}</li>
+            </ul>
+          </div>
+        `;
+        
+        // Create debug modal
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+          position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          background: white;
+          padding: 2rem;
+          border-radius: 8px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+          z-index: 3001;
+          max-width: 600px;
+          max-height: 80vh;
+          overflow-y: auto;
+        `;
+        modal.innerHTML = message + `
+          <button onclick="this.parentElement.remove()" 
+            style="margin-top: 1rem; padding: 0.5rem 1rem; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer;">
+            닫기
+          </button>
+        `;
+        document.body.appendChild(modal);
+      } else {
+        showMessage('폴더 정보 확인 실패: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .getAppFolderInfo();
+}
+
+// 새로운 파일 검색 테스트 함수
+function testFileSearch() {
+  showLoading('파일 검색 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      showMessage('파일 검색 테스트 완료 - 콘솔 로그를 확인하세요', 'success');
+      console.log('테스트 결과:', result);
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      showMessage('테스트 실행 중 오류: ' + error, 'error');
+    })
+    .testFileSearch();
+}
+
+// getEvaluationPlans 테스트 함수
+function testGetEvaluationPlansFunction() {
+  showLoading('getEvaluationPlans 함수 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      console.log('getEvaluationPlans 테스트 결과:', result);
+      
+      if (!result) {
+        showMessage('테스트 실패: 결과가 null입니다', 'error');
+        return;
+      }
+      
+      if (result.success) {
+        showMessage(`테스트 성공: ${result.length}개의 평가계획 반환됨 (타입: ${result.type}, 배열: ${result.isArray})`, 'success');
+      } else {
+        showMessage(`테스트 실패: ${result.error}`, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('테스트 실행 중 오류:', error);
+      showMessage('테스트 실행 중 오류: ' + error, 'error');
+    })
+    .testGetEvaluationPlans();
+}
+
+// Generation Functions
+function loadEvaluationPlansForSelect() {
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      const select = document.getElementById('evaluation-plan');
+      if (!select) {
+        console.error('evaluation-plan select element not found');
+        return;
+      }
+      
+      select.innerHTML = '<option value="">선택하세요 (선택사항)</option>';
+      
+      try {
+        const plans = JSON.parse(jsonString || '[]');
+        
+        if (!Array.isArray(plans)) {
+          console.error('loadEvaluationPlansForSelect: plans is not an array:', typeof plans);
+          return;
+        }
+        
+        plans.forEach(plan => {
+          const option = document.createElement('option');
+          option.value = plan.id;
+          option.textContent = `${plan.data.subject} - ${plan.data.grade} ${plan.data.semester}`;
+          select.appendChild(option);
+        });
+      } catch (error) {
+        console.error('Error parsing evaluation plans:', error);
+        showMessage('평가계획을 불러오는 중 오류가 발생했습니다.', 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      console.error('loadEvaluationPlansForSelect error:', error);
+      showMessage('평가계획을 불러올 수 없습니다.', 'error');
+    })
+    .getEvaluationPlansJSON();
+}
+
+function loadStudentEvaluations() {
+  const studentName = document.getElementById('student-name').value.trim();
+  const className = document.getElementById('class-name').value.trim();
+  
+  if (!studentName || !className) {
+    showMessage('학생 이름과 학급을 먼저 입력해주세요.', 'error');
+    return;
+  }
+
+  google.script.run
+    .withSuccessHandler(function(evaluations) {
+      const select = document.getElementById('self-evaluation');
+      select.innerHTML = '<option value="">선택하세요 (선택사항)</option>';
+      
+      // Store evaluations data for preview
+      select.evaluationsData = {};
+      
+      evaluations.forEach(evaluation => {
+        const option = document.createElement('option');
+        option.value = evaluation.id;
+        option.textContent = `${evaluation.data.subject} - ${new Date(evaluation.data.submittedAt || evaluation.createdDate).toLocaleDateString()}`;
+        select.appendChild(option);
+        
+        // Store evaluation data
+        select.evaluationsData[evaluation.id] = evaluation.data;
+      });
+      
+      // Add change listener for preview
+      select.onchange = function() {
+        if (this.value && this.evaluationsData[this.value]) {
+          displayEvaluationPreview(this.evaluationsData[this.value]);
+        } else {
+          document.getElementById('evaluation-preview').style.display = 'none';
+        }
+      };
+      
+      if (evaluations.length === 0) {
+        showMessage('해당 학생의 자기평가 결과가 없습니다.', 'info');
+      } else {
+        showMessage(`${evaluations.length}개의 자기평가를 불러왔습니다.`, 'success');
+      }
+    })
+    .withFailureHandler(handleError)
+    .getStudentEvaluations(studentName, className);
+}
+
+function displayEvaluationPreview(evaluationData) {
+  const preview = document.getElementById('evaluation-preview');
+  
+  let html = '<h4>자기평가 내용</h4>';
+  
+  if (evaluationData.responses) {
+    // Multiple choice responses
+    if (evaluationData.responses.multipleChoice && evaluationData.responses.multipleChoice.length > 0) {
+      evaluationData.responses.multipleChoice.forEach((resp, index) => {
+        html += `
+          <div class="evaluation-response">
+            <div class="evaluation-question">객관식 ${index + 1}. ${resp.question}</div>
+            <div class="evaluation-answer">→ ${resp.answer}</div>
+          </div>
+        `;
+      });
+    }
+    
+    // Short answer responses
+    if (evaluationData.responses.shortAnswer && evaluationData.responses.shortAnswer.length > 0) {
+      evaluationData.responses.shortAnswer.forEach((resp, index) => {
+        html += `
+          <div class="evaluation-response">
+            <div class="evaluation-question">주관식 ${index + 1}. ${resp.question}</div>
+            <div class="evaluation-answer">→ ${resp.answer}</div>
+          </div>
+        `;
+      });
+    }
+  }
+  
+  preview.innerHTML = html;
+  preview.style.display = 'block';
+}
+
+function handleGenerateSubmit(e) {
+  e.preventDefault();
+  
+  // Collect form data
+  const params = {
+    type: document.getElementById('record-type').value,
+    studentName: document.getElementById('student-name').value.trim(),
+    className: document.getElementById('class-name').value.trim(),
+    subject: document.getElementById('subject').value,
+    activityType: document.getElementById('activity-type').value,
+    evaluationPlanId: document.getElementById('evaluation-plan').value,
+    selfEvaluationId: document.getElementById('self-evaluation').value,
+    observationNotes: document.getElementById('observation-notes').value.trim()
+  };
+
+  // Validate
+  if (!params.type || !params.studentName || !params.className) {
+    showMessage('필수 항목을 모두 입력해주세요.', 'error');
+    return;
+  }
+
+  if (params.type === '교과학습발달상황' && !params.subject) {
+    showMessage('과목을 선택해주세요.', 'error');
+    return;
+  }
+  
+  if (params.type === '창의적체험활동' && !params.activityType) {
+    showMessage('활동 종류를 선택해주세요.', 'error');
+    return;
+  }
+
+  currentGenerationParams = params;
+  generateContent(params);
+}
+
+function generateContent(params) {
+  showLoading('AI가 생기부 초안을 생성하는 중...');
+  
+  // First, load evaluation plan and self evaluation if selected
+  let evaluationPlan = null;
+  let selfEvaluation = null;
+  
+  const promises = [];
+  
+  // Load evaluation plan
+  if (params.evaluationPlanId) {
+    promises.push(new Promise((resolve) => {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(() => resolve(null))
+        .getEvaluationPlans();
+    }));
+  }
+  
+  // Load self evaluation
+  if (params.selfEvaluationId) {
+    promises.push(new Promise((resolve) => {
+      google.script.run
+        .withSuccessHandler(function(evaluations) {
+          const evaluation = evaluations.find(e => e.id === params.selfEvaluationId);
+          resolve(evaluation ? evaluation.data : null);
+        })
+        .withFailureHandler(() => resolve(null))
+        .getStudentEvaluations(params.studentName, params.className);
+    }));
+  }
+  
+  Promise.all(promises).then(results => {
+    if (params.evaluationPlanId && results[0]) {
+      const plan = results[0].find(p => p.id === params.evaluationPlanId);
+      if (plan) evaluationPlan = plan.data;
+    }
+    
+    if (params.selfEvaluationId && results.length > 1 && results[1]) {
+      selfEvaluation = results[1];
+    }
+    
+    // Generate content
+    const generateParams = {
+      ...params,
+      evaluationPlan: evaluationPlan,
+      selfEvaluation: selfEvaluation ? formatSelfEvaluation(selfEvaluation) : null
+    };
+    
+    google.script.run
+      .withSuccessHandler(function(result) {
+        hideLoading();
+        if (result.success) {
+          displayGeneratedContent(result.content, result.validation);
+          showMessage('생기부 초안이 생성되었습니다.', 'success');
+        } else {
+          showMessage('생성 중 오류가 발생했습니다: ' + result.error, 'error');
+        }
+      })
+      .withFailureHandler(handleError)
+      .generateSaenggibuContent(generateParams);
+  });
+}
+
+// Format self evaluation data for AI prompt
+function formatSelfEvaluation(data) {
+  let formatted = '';
+  
+  if (data.responses) {
+    // Format multiple choice responses
+    if (data.responses.multipleChoice) {
+      formatted += '객관식 답변:\n';
+      data.responses.multipleChoice.forEach((resp, index) => {
+        formatted += `${index + 1}. ${resp.question}: ${resp.answer}\n`;
+      });
+    }
+    
+    // Format short answer responses
+    if (data.responses.shortAnswer) {
+      formatted += '\n주관식 답변:\n';
+      data.responses.shortAnswer.forEach((resp, index) => {
+        formatted += `${index + 1}. ${resp.question}: ${resp.answer}\n`;
+      });
+    }
+  }
+  
+  return formatted || '자기평가 데이터 형식 오류';
+}
+
+function displayGeneratedContent(content, validation) {
+  document.getElementById('generation-result').style.display = 'block';
+  document.getElementById('result-editor').textContent = content;
+  
+  updateCharacterCount();
+  
+  // Display validation warnings
+  const warningsContainer = document.getElementById('validation-warnings');
+  warningsContainer.innerHTML = '';
+  
+  if (validation.warnings && validation.warnings.length > 0) {
+    validation.warnings.forEach(warning => {
+      const div = document.createElement('div');
+      div.className = 'warning';
+      div.innerHTML = `<i class="material-icons">warning</i><span>${warning}</span>`;
+      warningsContainer.appendChild(div);
+    });
+  }
+  
+  // Scroll to result
+  document.getElementById('generation-result').scrollIntoView({ behavior: 'smooth' });
+}
+
+function updateCharacterCount() {
+  const editor = document.getElementById('result-editor');
+  const count = editor.textContent.length;
+  const countElement = document.getElementById('char-count');
+  
+  countElement.textContent = count;
+  
+  if (count > 500) {
+    countElement.style.color = '#c5221f';
+  } else {
+    countElement.style.color = '#5f6368';
+  }
+}
+
+function copyToClipboard() {
+  const editor = document.getElementById('result-editor');
+  const text = editor.textContent;
+  
+  navigator.clipboard.writeText(text).then(() => {
+    showMessage('클립보드에 복사되었습니다.', 'success');
+  }).catch(() => {
+    // Fallback for older browsers
+    const textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.select();
+    
+    try {
+      document.execCommand('copy');
+      showMessage('클립보드에 복사되었습니다.', 'success');
+    } catch (err) {
+      showMessage('복사에 실패했습니다.', 'error');
+    }
+    
+    document.body.removeChild(textArea);
+  });
+}
+
+function saveGeneratedContent() {
+  const content = document.getElementById('result-editor').textContent;
+  
+  if (!content) {
+    showMessage('저장할 내용이 없습니다.', 'error');
+    return;
+  }
+
+  const contentData = {
+    ...currentGenerationParams,
+    content: content,
+    validation: {
+      characterCount: content.length
+    }
+  };
+
+  showLoading('저장 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage('저장되었습니다.', 'success');
+      } else {
+        showMessage('저장 중 오류가 발생했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .saveGeneratedContent(contentData);
+}
+
+function regenerateContent() {
+  if (currentGenerationParams) {
+    generateContent(currentGenerationParams);
+  }
+}
+
+// Class Management Functions
+let currentClassList = [];
+let currentStudentList = [];
+let currentEvaluationResults = {};
+
+function switchClassTab(tab) {
+  // Update tab buttons
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+  event.target.classList.add('active');
+  
+  // Update tab content
+  document.querySelectorAll('.class-tab-content').forEach(content => content.classList.remove('active'));
+  document.getElementById(`class-${tab}-tab`).classList.add('active');
+  
+  // Load data for specific tabs
+  if (tab === 'list') {
+    loadClassList();
+  } else if (tab === 'evaluation-input') {
+    loadEvaluationInputData();
+  }
+}
+
+function loadClassList() {
+  showLoading('학급 목록을 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(classList) {
+      hideLoading();
+      currentClassList = classList;
+      displayClassList(classList);
+    })
+    .withFailureHandler(handleError)
+    .getClassList();
+}
+
+function displayClassList(classList) {
+  const container = document.getElementById('class-list');
+  
+  if (classList.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <i class="material-icons">school</i>
+        <p>등록된 학급이 없습니다.</p>
+        <button class="btn btn-primary" onclick="switchClassTab('create')">
+          <i class="material-icons">add</i>
+          학급 만들기
+        </button>
+      </div>
+    `;
+    return;
+  }
+  
+  container.innerHTML = classList.map(classInfo => `
+    <div class="class-card" onclick="viewClassDetails('${classInfo.className}')">
+      <h3>${classInfo.className}</h3>
+      <p class="class-info"><i class="material-icons">school</i> ${classInfo.grade} ${classInfo.semester}</p>
+      <p class="class-info"><i class="material-icons">person</i> 담임: ${classInfo.teacher}</p>
+      <p class="class-info"><i class="material-icons">groups</i> 학생 수: ${classInfo.studentCount}명</p>
+      <p class="class-info"><i class="material-icons">update</i> 최종 수정: ${new Date(classInfo.updatedAt).toLocaleDateString()}</p>
+    </div>
+  `).join('');
+}
+
+function viewClassDetails(className) {
+  // Load class details
+  showLoading('학급 정보를 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(classData) {
+      hideLoading();
+      if (classData) {
+        displayClassDetailsModal(classData);
+      } else {
+        showMessage('학급 정보를 찾을 수 없습니다.', 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .getClassRoster(className);
+}
+
+// Display class details in a modal
+function displayClassDetailsModal(classData) {
+  // Create modal overlay
+  const modalOverlay = document.createElement('div');
+  modalOverlay.className = 'modal-overlay active';
+  modalOverlay.id = 'class-details-modal';
+  
+  // Create modal content
+  const modalContent = document.createElement('div');
+  modalContent.className = 'modal-content class-details-modal';
+  
+  // Modal HTML
+  modalContent.innerHTML = `
+    <div class="modal-header">
+      <h2>${classData.className} 상세 정보</h2>
+      <button class="btn-icon" onclick="closeClassDetailsModal()">
+        <i class="material-icons">close</i>
+      </button>
+    </div>
+    
+    <div class="modal-body">
+      <!-- Class Info Section -->
+      <div class="class-info-section">
+        <h3>학급 정보</h3>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>학급명</label>
+            <div id="class-name-display">${classData.className}</div>
+          </div>
+          <div class="info-item">
+            <label>학년</label>
+            <div id="class-grade-display">${classData.grade}</div>
+          </div>
+          <div class="info-item">
+            <label>학기</label>
+            <div id="class-semester-display">${classData.semester}</div>
+          </div>
+          <div class="info-item">
+            <label>담임교사</label>
+            <div id="class-teacher-display">${classData.teacher}</div>
+          </div>
+        </div>
+        <button class="btn btn-small" onclick="toggleEditClassInfo('${classData.className}')">
+          <i class="material-icons">edit</i>
+          학급 정보 수정
+        </button>
+      </div>
+      
+      <!-- Student Roster Section -->
+      <div class="student-roster-section">
+        <div class="section-header">
+          <h3>학생 명단 (${classData.students.length}명)</h3>
+          <div class="section-actions">
+            <button class="btn btn-small" onclick="toggleEditStudents()">
+              <i class="material-icons">edit</i>
+              명단 편집
+            </button>
+            <button class="btn btn-small btn-secondary" onclick="exportStudentList('${classData.className}')">
+              <i class="material-icons">download</i>
+              명단 내보내기
+            </button>
+          </div>
+        </div>
+        
+        <div id="student-list-display" class="student-list">
+          <table class="student-table">
+            <thead>
+              <tr>
+                <th width="80">번호</th>
+                <th>이름</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${classData.students.map(student => `
+                <tr>
+                  <td>${student.number}</td>
+                  <td>${student.name}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        
+        <div id="student-list-edit" class="student-list-edit" style="display: none;">
+          <div class="edit-student-rows">
+            ${classData.students.map(student => `
+              <div class="edit-student-row" data-student-id="${student.number}">
+                <input type="number" class="edit-student-number" value="${student.number}" min="1">
+                <input type="text" class="edit-student-name" value="${student.name}" placeholder="학생 이름">
+                <button class="btn-icon btn-delete" onclick="removeEditStudent(this)">
+                  <i class="material-icons">delete</i>
+                </button>
+              </div>
+            `).join('')}
+          </div>
+          <button class="btn btn-small" onclick="addEditStudent()">
+            <i class="material-icons">add</i>
+            학생 추가
+          </button>
+        </div>
+      </div>
+      
+      <!-- Evaluation Results Section -->
+      <div class="evaluation-results-section">
+        <h3>평가 결과</h3>
+        <div id="class-evaluation-results">
+          <p style="color: #5f6368; text-align: center;">평가 결과를 불러오는 중...</p>
+        </div>
+      </div>
+    </div>
+    
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeClassDetailsModal()">닫기</button>
+      <button class="btn btn-danger" onclick="confirmDeleteClass('${classData.className}')">
+        <i class="material-icons">delete</i>
+        학급 삭제
+      </button>
+      <button id="save-class-changes" class="btn btn-primary" style="display: none;" onclick="saveClassChanges('${classData.className}')">
+        <i class="material-icons">save</i>
+        변경사항 저장
+      </button>
+    </div>
+  `;
+  
+  modalOverlay.appendChild(modalContent);
+  document.body.appendChild(modalOverlay);
+  
+  // Store current class data globally for editing
+  window.currentClassData = classData;
+  
+  // Load evaluation results
+  loadClassEvaluationResults(classData.className);
+}
+
+// Close class details modal
+function closeClassDetailsModal() {
+  const modal = document.getElementById('class-details-modal');
+  if (modal) {
+    modal.remove();
+  }
+  window.currentClassData = null;
+}
+
+// Toggle edit mode for class info
+function toggleEditClassInfo(className) {
+  const isEditing = document.querySelector('.class-info-section.editing');
+  
+  if (isEditing) {
+    // Switch back to display mode
+    document.querySelector('.class-info-section').classList.remove('editing');
+    document.getElementById('save-class-changes').style.display = 'none';
+  } else {
+    // Switch to edit mode
+    document.querySelector('.class-info-section').classList.add('editing');
+    
+    // Replace display fields with inputs
+    const classData = window.currentClassData;
+    
+    document.getElementById('class-name-display').innerHTML = 
+      `<input type="text" id="edit-class-name" value="${classData.className}" class="form-control">`;
+    
+    document.getElementById('class-grade-display').innerHTML = 
+      `<select id="edit-class-grade" class="form-control">
+        <option value="">선택하세요</option>
+        ${[1,2,3,4,5,6].map(g => 
+          `<option value="${g}학년" ${classData.grade === g+'학년' ? 'selected' : ''}>${g}학년</option>`
+        ).join('')}
+      </select>`;
+    
+    document.getElementById('class-semester-display').innerHTML = 
+      `<select id="edit-class-semester" class="form-control">
+        <option value="1학기" ${classData.semester === '1학기' ? 'selected' : ''}>1학기</option>
+        <option value="2학기" ${classData.semester === '2학기' ? 'selected' : ''}>2학기</option>
+      </select>`;
+    
+    document.getElementById('class-teacher-display').innerHTML = 
+      `<input type="text" id="edit-class-teacher" value="${classData.teacher}" class="form-control">`;
+    
+    document.getElementById('save-class-changes').style.display = 'inline-flex';
+  }
+}
+
+// Toggle edit mode for students
+function toggleEditStudents() {
+  const displayMode = document.getElementById('student-list-display');
+  const editMode = document.getElementById('student-list-edit');
+  const saveButton = document.getElementById('save-class-changes');
+  
+  if (editMode.style.display === 'none') {
+    displayMode.style.display = 'none';
+    editMode.style.display = 'block';
+    saveButton.style.display = 'inline-flex';
+  } else {
+    displayMode.style.display = 'block';
+    editMode.style.display = 'none';
+    
+    // Check if class info is also not being edited
+    if (!document.querySelector('.class-info-section.editing')) {
+      saveButton.style.display = 'none';
+    }
+  }
+}
+
+// Add student in edit mode
+function addEditStudent() {
+  const container = document.querySelector('.edit-student-rows');
+  const lastRow = container.lastElementChild;
+  const lastNumber = lastRow ? parseInt(lastRow.querySelector('.edit-student-number').value) : 0;
+  
+  const newRow = document.createElement('div');
+  newRow.className = 'edit-student-row';
+  newRow.innerHTML = `
+    <input type="number" class="edit-student-number" value="${lastNumber + 1}" min="1">
+    <input type="text" class="edit-student-name" placeholder="학생 이름">
+    <button class="btn-icon btn-delete" onclick="removeEditStudent(this)">
+      <i class="material-icons">delete</i>
+    </button>
+  `;
+  
+  container.appendChild(newRow);
+}
+
+// Remove student in edit mode
+function removeEditStudent(button) {
+  const row = button.parentElement;
+  if (document.querySelectorAll('.edit-student-row').length > 1) {
+    row.remove();
+  } else {
+    showMessage('최소 1명의 학생은 필요합니다.', 'warning');
+  }
+}
+
+// Save class changes
+function saveClassChanges(originalClassName) {
+  const classData = {
+    className: originalClassName, // Keep original for identification
+    students: []
+  };
+  
+  // Check if class info is being edited
+  if (document.querySelector('.class-info-section.editing')) {
+    const newClassName = document.getElementById('edit-class-name').value.trim();
+    const newGrade = document.getElementById('edit-class-grade').value;
+    const newSemester = document.getElementById('edit-class-semester').value;
+    const newTeacher = document.getElementById('edit-class-teacher').value.trim();
+    
+    if (!newClassName || !newGrade || !newTeacher) {
+      showMessage('학급명, 학년, 담임교사는 필수 항목입니다.', 'error');
+      return;
+    }
+    
+    classData.className = newClassName;
+    classData.grade = newGrade;
+    classData.semester = newSemester;
+    classData.teacher = newTeacher;
+  } else {
+    // Keep existing class info
+    classData.grade = window.currentClassData.grade;
+    classData.semester = window.currentClassData.semester;
+    classData.teacher = window.currentClassData.teacher;
+  }
+  
+  // Get students from edit mode if active
+  if (document.getElementById('student-list-edit').style.display !== 'none') {
+    const rows = document.querySelectorAll('.edit-student-row');
+    classData.students = Array.from(rows).map(row => ({
+      number: parseInt(row.querySelector('.edit-student-number').value),
+      name: row.querySelector('.edit-student-name').value.trim()
+    })).filter(s => s.name); // Filter out empty names
+    
+    if (classData.students.length === 0) {
+      showMessage('최소 1명의 학생을 입력해주세요.', 'error');
+      return;
+    }
+  } else {
+    // Keep existing students
+    classData.students = window.currentClassData.students;
+  }
+  
+  showLoading('변경사항을 저장하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage('변경사항이 저장되었습니다.', 'success');
+        closeClassDetailsModal();
+        loadClassList(); // Refresh the class list
+      } else {
+        showMessage('저장 실패: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .updateClassRoster(originalClassName, classData);
+}
+
+// Export student list
+function exportStudentList(className) {
+  const classData = window.currentClassData;
+  
+  // Create CSV content
+  let csvContent = "번호,이름\n";
+  classData.students.forEach(student => {
+    csvContent += `${student.number},${student.name}\n`;
+  });
+  
+  // Create blob and download
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  
+  link.setAttribute('href', url);
+  link.setAttribute('download', `${className}_학생명단_${new Date().toISOString().split('T')[0]}.csv`);
+  link.style.visibility = 'hidden';
+  
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  
+  showMessage('학생 명단이 다운로드되었습니다.', 'success');
+}
+
+// Confirm class deletion
+function confirmDeleteClass(className) {
+  if (confirm(`정말로 "${className}" 학급을 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없으며, 모든 관련 데이터가 삭제됩니다.`)) {
+    deleteClass(className);
+  }
+}
+
+// Delete class
+function deleteClass(className) {
+  showLoading('학급을 삭제하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage(`${className} 학급이 삭제되었습니다.`, 'success');
+        closeClassDetailsModal();
+        loadClassList(); // Refresh the class list
+      } else {
+        showMessage('삭제 실패: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .deleteClass(className);
+}
+
+// Load evaluation results for the class
+function loadClassEvaluationResults(className) {
+  google.script.run
+    .withSuccessHandler(function(results) {
+      displayClassEvaluationResults(results);
+    })
+    .withFailureHandler(function(error) {
+      document.getElementById('class-evaluation-results').innerHTML = 
+        '<p style="color: #c5221f; text-align: center;">평가 결과를 불러오는 데 실패했습니다.</p>';
+    })
+    .getEvaluationResults(className);
+}
+
+// Display evaluation results
+function displayClassEvaluationResults(results) {
+  const container = document.getElementById('class-evaluation-results');
+  
+  if (results.length === 0) {
+    container.innerHTML = '<p style="color: #5f6368; text-align: center;">아직 평가 결과가 없습니다.</p>';
+    return;
+  }
+  
+  container.innerHTML = `
+    <div class="evaluation-results-list">
+      ${results.map(result => `
+        <div class="evaluation-result-item">
+          <div class="result-header">
+            <span class="result-name">${result.data.evaluationName}</span>
+            <span class="result-date">${new Date(result.data.updatedAt).toLocaleDateString()}</span>
+          </div>
+          <div class="result-summary">
+            <span>평가 인원: ${Object.keys(result.data.results).length}명</span>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function switchInputMethod(method) {
+  // Update method tabs
+  document.querySelectorAll('.method-tab').forEach(tab => tab.classList.remove('active'));
+  event.target.classList.add('active');
+  
+  // Update method content
+  document.querySelectorAll('.input-method').forEach(content => content.classList.remove('active'));
+  document.getElementById(`${method}-input`).classList.add('active');
+}
+
+function addStudentRow() {
+  const container = document.getElementById('student-rows');
+  const lastRow = container.lastElementChild;
+  const lastNumber = lastRow ? parseInt(lastRow.querySelector('.student-number').value) : 0;
+  
+  const newRow = document.createElement('div');
+  newRow.className = 'student-row';
+  newRow.innerHTML = `
+    <input type="number" class="student-number" value="${lastNumber + 1}" min="1">
+    <input type="text" class="student-name" placeholder="학생 이름">
+    <button class="btn-icon" onclick="removeStudentRow(this)">
+      <i class="material-icons">delete</i>
+    </button>
+  `;
+  
+  container.appendChild(newRow);
+}
+
+function removeStudentRow(button) {
+  const row = button.parentElement;
+  if (document.querySelectorAll('.student-row').length > 1) {
+    row.remove();
+  } else {
+    showMessage('최소 1명의 학생은 필요합니다.', 'warning');
+  }
+}
+
+function handleCSVUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const base64Data = btoa(e.target.result);
+    
+    showLoading('CSV 파일 처리 중...');
+    
+    google.script.run
+      .withSuccessHandler(function(result) {
+        hideLoading();
+        if (result.success) {
+          displayCSVPreview(result.students);
+          showMessage(`${result.count}명의 학생을 불러왔습니다.`, 'success');
+        } else {
+          showMessage(result.error, 'error');
+        }
+      })
+      .withFailureHandler(handleError)
+      .processStudentCSV(base64Data, file.name);
+  };
+  
+  reader.readAsBinaryString(file);
+}
+
+function displayCSVPreview(students) {
+  const preview = document.getElementById('csv-preview');
+  preview.innerHTML = `
+    <h4>학생 명단 미리보기 (${students.length}명)</h4>
+    <table style="width: 100%;">
+      <thead>
+        <tr>
+          <th style="text-align: left;">번호</th>
+          <th style="text-align: left;">이름</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${students.map(student => `
+          <tr>
+            <td>${student.number}</td>
+            <td>${student.name}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  
+  // Store CSV data for later use
+  window.csvStudents = students;
+}
+
+function createClass() {
+  const className = document.getElementById('new-class-name').value.trim();
+  const grade = document.getElementById('new-class-grade').value;
+  const semester = document.getElementById('new-class-semester').value;
+  const teacher = document.getElementById('new-class-teacher').value.trim();
+  
+  console.log('학급 생성 정보:', { className, grade, semester, teacher });
+  
+  if (!className || !grade || !teacher) {
+    console.log('필수 정보 누락:', { 
+      className: className || '없음', 
+      grade: grade || '없음', 
+      teacher: teacher || '없음' 
+    });
+    
+    let missingFields = [];
+    if (!className) missingFields.push('학급명');
+    if (!grade) missingFields.push('학년');
+    if (!teacher) missingFields.push('담임교사');
+    
+    showMessage(`다음 필수 정보를 입력해주세요: ${missingFields.join(', ')}`, 'error');
+    return;
+  }
+  
+  // Get students from active input method
+  let students = [];
+  
+  if (document.getElementById('manual-input').classList.contains('active')) {
+    // Get students from manual input
+    const rows = document.querySelectorAll('.student-row');
+    students = Array.from(rows).map(row => {
+      const number = parseInt(row.querySelector('.student-number').value);
+      const name = row.querySelector('.student-name').value.trim();
+      return { number, name };
+    }).filter(s => s.name); // Filter out empty names
+  } else if (window.csvStudents) {
+    // Get students from CSV
+    students = window.csvStudents;
+  }
+  
+  if (students.length === 0) {
+    showMessage('최소 1명의 학생을 입력해주세요.', 'error');
+    return;
+  }
+  
+  const classData = {
+    className,
+    grade,
+    semester,
+    teacher,
+    students
+  };
+  
+  showLoading('학급을 생성하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage(`${result.className} (${result.studentCount}명) 생성 완료`, 'success');
+        // Clear form
+        document.getElementById('new-class-name').value = '';
+        document.getElementById('new-class-grade').value = '';
+        document.getElementById('new-class-teacher').value = '';
+        document.getElementById('student-rows').innerHTML = `
+          <div class="student-row">
+            <input type="number" class="student-number" value="1" min="1">
+            <input type="text" class="student-name" placeholder="학생 이름">
+            <button class="btn-icon" onclick="removeStudentRow(this)">
+              <i class="material-icons">delete</i>
+            </button>
+          </div>
+        `;
+        window.csvStudents = null;
+        document.getElementById('csv-preview').innerHTML = '';
+        
+        // Switch to list tab
+        switchClassTab('list');
+      } else {
+        showMessage('학급 생성 실패: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .saveClassRoster(classData);
+}
+
+// Enhanced Evaluation Input Functions
+let currentEvaluationStep = 1;
+let selectedClass = null;
+let selectedSubject = null;
+let selectedEvaluationPlan = null;
+let selectedEvaluationItem = null;
+let allEvaluationPlans = [];
+
+function loadEvaluationInputData() {
+  // Reset state
+  currentEvaluationStep = 1;
+  selectedClass = null;
+  selectedSubject = null;
+  selectedEvaluationPlan = null;
+  selectedEvaluationItem = null;
+  
+  // Reset UI
+  resetEvaluationSteps();
+  setActiveEvaluationStep(1);
+  
+  // Load class list for dropdown
+  google.script.run
+    .withSuccessHandler(function(classList) {
+      const select = document.getElementById('evaluation-class-select');
+      select.innerHTML = '<option value="">학급을 선택하세요</option>' +
+        classList.map(c => `<option value="${c.className}">${c.className}</option>`).join('');
+    })
+    .withFailureHandler(handleError)
+    .getClassList();
+  
+  // Load evaluation plans
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      try {
+        allEvaluationPlans = JSON.parse(jsonString || '[]');
+        console.log('Loaded evaluation plans:', allEvaluationPlans);
+      } catch (error) {
+        console.error('Error parsing evaluation plans:', error);
+        allEvaluationPlans = [];
+      }
+    })
+    .withFailureHandler(handleError)
+    .getEvaluationPlansJSON();
+}
+
+function resetEvaluationSteps() {
+  // Hide all step contents
+  for (let i = 1; i <= 4; i++) {
+    document.getElementById(`evaluation-step-${i}`).style.display = 'none';
+    document.getElementById(`step-${i}`).classList.remove('active', 'completed');
+  }
+  
+  // Reset navigation
+  document.getElementById('eval-prev-btn').style.display = 'none';
+  document.getElementById('eval-next-btn').style.display = 'none';
+}
+
+function setActiveEvaluationStep(step) {
+  currentEvaluationStep = step;
+  
+  // Update step indicator
+  for (let i = 1; i <= 4; i++) {
+    const stepElement = document.getElementById(`step-${i}`);
+    const connectors = document.querySelectorAll('.step-connector');
+    
+    if (i < step) {
+      stepElement.classList.add('completed');
+      stepElement.classList.remove('active');
+      if (connectors[i - 1]) {
+        connectors[i - 1].classList.add('completed');
+      }
+    } else if (i === step) {
+      stepElement.classList.add('active');
+      stepElement.classList.remove('completed');
+    } else {
+      stepElement.classList.remove('active', 'completed');
+      if (connectors[i - 1]) {
+        connectors[i - 1].classList.remove('completed');
+      }
+    }
+  }
+  
+  // Show current step content
+  for (let i = 1; i <= 4; i++) {
+    document.getElementById(`evaluation-step-${i}`).style.display = i === step ? 'block' : 'none';
+  }
+  
+  // Update navigation buttons
+  document.getElementById('eval-prev-btn').style.display = step > 1 ? 'inline-flex' : 'none';
+  document.getElementById('eval-next-btn').style.display = 
+    (step < 4 && canProceedToNextStep(step)) ? 'inline-flex' : 'none';
+}
+
+function canProceedToNextStep(step) {
+  switch (step) {
+    case 1: return selectedClass !== null;
+    case 2: return selectedSubject !== null;
+    case 3: return selectedEvaluationPlan !== null;
+    case 4: return selectedEvaluationItem !== null;
+    default: return false;
+  }
+}
+
+function onClassSelected() {
+  const select = document.getElementById('evaluation-class-select');
+  const className = select.value;
+  
+  if (!className) {
+    selectedClass = null;
+    document.getElementById('selected-class-info').style.display = 'none';
+    setActiveEvaluationStep(1);
+    return;
+  }
+  
+  showLoading('학급 정보를 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(classData) {
+      hideLoading();
+      if (classData) {
+        selectedClass = classData;
+        displaySelectedClassInfo(classData);
+        setActiveEvaluationStep(1);
+        setupSubjectSelection();
+      }
+    })
+    .withFailureHandler(handleError)
+    .getClassRoster(className);
+}
+
+function displaySelectedClassInfo(classData) {
+  const container = document.getElementById('selected-class-info');
+  
+  container.innerHTML = `
+    <h4>${classData.className} 정보</h4>
+    <div class="info-grid">
+      <div class="info-item">
+        <div class="label">학년</div>
+        <div class="value">${classData.grade}</div>
+      </div>
+      <div class="info-item">
+        <div class="label">학기</div>
+        <div class="value">${classData.semester}</div>
+      </div>
+      <div class="info-item">
+        <div class="label">담임교사</div>
+        <div class="value">${classData.teacher}</div>
+      </div>
+      <div class="info-item">
+        <div class="label">학생 수</div>
+        <div class="value">${classData.students.length}명</div>
+      </div>
+    </div>
+  `;
+  
+  container.style.display = 'block';
+}
+
+function setupSubjectSelection() {
+  const subjects = [
+    { name: '국어', icon: 'auto_stories' },
+    { name: '수학', icon: 'calculate' },
+    { name: '사회', icon: 'public' },
+    { name: '과학', icon: 'science' },
+    { name: '영어', icon: 'translate' },
+    { name: '도덕', icon: 'favorite' },
+    { name: '실과', icon: 'engineering' },
+    { name: '체육', icon: 'sports_soccer' },
+    { name: '음악', icon: 'music_note' },
+    { name: '미술', icon: 'palette' }
+  ];
+  
+  const container = document.getElementById('subject-selection-grid');
+  
+  container.innerHTML = subjects.map(subject => `
+    <div class="subject-card" onclick="selectSubject('${subject.name}')">
+      <i class="material-icons">${subject.icon}</i>
+      <h4>${subject.name}</h4>
+    </div>
+  `).join('');
+}
+
+function selectSubject(subjectName) {
+  selectedSubject = subjectName;
+  
+  // Update UI
+  document.querySelectorAll('.subject-card').forEach(card => {
+    card.classList.remove('selected');
+  });
+  
+  event.target.closest('.subject-card').classList.add('selected');
+  
+  // Update step 3 title
+  document.getElementById('selected-subject-title').textContent = 
+    `${subjectName} 과목의 평가계획을 선택하세요.`;
+  
+  // Load evaluation plans for selected subject
+  loadEvaluationPlansForSubject(subjectName);
+  
+  // Update navigation to show next button
+  setActiveEvaluationStep(2);
+}
+
+function loadEvaluationPlansForSubject(subject) {
+  const filteredPlans = allEvaluationPlans.filter(plan => 
+    plan.data.subject === subject
+  );
+  
+  const container = document.getElementById('evaluation-plans-grid');
+  const noPlansMessage = document.getElementById('no-plans-message');
+  
+  if (filteredPlans.length === 0) {
+    container.style.display = 'none';
+    noPlansMessage.style.display = 'block';
+    return;
+  }
+  
+  container.style.display = 'grid';
+  noPlansMessage.style.display = 'none';
+  
+  container.innerHTML = filteredPlans.map(plan => {
+    const evaluationCount = plan.data.evaluations ? plan.data.evaluations.length : 1;
+    const totalStandards = plan.data.evaluations 
+      ? plan.data.evaluations.reduce((sum, eval) => sum + (eval.achievementStandards ? eval.achievementStandards.length : 0), 0)
+      : (plan.data.achievementStandards ? plan.data.achievementStandards.length : 0);
+    
+    return `
+      <div class="evaluation-plan-card" onclick="selectEvaluationPlan('${plan.id}')">
+        <h4>${plan.data.subject} - ${plan.data.grade}</h4>
+        <div class="plan-meta">${plan.data.semester} | ${new Date(plan.modifiedDate).toLocaleDateString()}</div>
+        <div class="plan-details">
+          <div>평가 항목: ${evaluationCount}개</div>
+          <div>성취기준: ${totalStandards}개</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function selectEvaluationPlan(planId) {
+  const plan = allEvaluationPlans.find(p => p.id === planId);
+  if (!plan) return;
+  
+  selectedEvaluationPlan = plan;
+  
+  // Update UI
+  document.querySelectorAll('.evaluation-plan-card').forEach(card => {
+    card.classList.remove('selected');
+  });
+  
+  event.target.closest('.evaluation-plan-card').classList.add('selected');
+  
+  // Display evaluation summary
+  displayEvaluationSummary(plan);
+  
+  // Load evaluation items
+  loadEvaluationItems(plan);
+  
+  // Update navigation to show next button
+  setActiveEvaluationStep(3);
+}
+
+function displayEvaluationSummary(plan) {
+  const container = document.getElementById('evaluation-summary');
+  
+  const evaluationCount = plan.data.evaluations ? plan.data.evaluations.length : 1;
+  const studentCount = selectedClass ? selectedClass.students.length : 0;
+  
+  container.innerHTML = `
+    <h4>평가 요약</h4>
+    <div class="summary-grid">
+      <div class="summary-item">
+        <div class="label">학급</div>
+        <div class="value">${selectedClass.className}</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">과목</div>
+        <div class="value">${plan.data.subject}</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">평가 항목</div>
+        <div class="value">${evaluationCount}개</div>
+      </div>
+      <div class="summary-item">
+        <div class="label">학생 수</div>
+        <div class="value">${studentCount}명</div>
+      </div>
+    </div>
+  `;
+}
+
+function loadEvaluationItems(plan) {
+  const container = document.getElementById('evaluation-items-grid');
+  
+  if (plan.data.evaluations && Array.isArray(plan.data.evaluations)) {
+    // New format with multiple evaluations
+    container.innerHTML = plan.data.evaluations.map((evaluation, index) => `
+      <div class="evaluation-item-card" onclick="selectEvaluationItem(${index})">
+        <h5>${evaluation.evaluationName}</h5>
+        <div class="item-details">
+          ${evaluation.unitName ? `<div>단원: ${evaluation.unitName}</div>` : ''}
+          <div>성취기준: ${evaluation.achievementStandards ? evaluation.achievementStandards.length : 0}개</div>
+          <div>평가방법: ${evaluation.evaluationMethod || '미설정'}</div>
+        </div>
+      </div>
+    `).join('');
+  } else {
+    // Legacy format - single evaluation
+    container.innerHTML = `
+      <div class="evaluation-item-card" onclick="selectEvaluationItem(0)">
+        <h5>전체 평가</h5>
+        <div class="item-details">
+          <div>성취기준: ${plan.data.achievementStandards ? plan.data.achievementStandards.length : 0}개</div>
+          <div>평가방법: ${plan.data.evaluationMethod || '미설정'}</div>
+        </div>
+      </div>
+    `;
+  }
+}
+
+function selectEvaluationItem(itemIndex) {
+  selectedEvaluationItem = itemIndex;
+  
+  // Update UI
+  document.querySelectorAll('.evaluation-item-card').forEach(card => {
+    card.classList.remove('selected');
+  });
+  
+  event.target.closest('.evaluation-item-card').classList.add('selected');
+  
+  // Load evaluation grid
+  loadEvaluationGrid();
+  
+  // Update navigation since this is the final step
+  setActiveEvaluationStep(4);
+}
+
+function loadEvaluationGrid() {
+  const container = document.getElementById('evaluation-grid-container');
+  const plan = selectedEvaluationPlan;
+  const itemIndex = selectedEvaluationItem;
+  
+  let evaluationName = '전체 평가';
+  if (plan.data.evaluations && plan.data.evaluations[itemIndex]) {
+    evaluationName = plan.data.evaluations[itemIndex].evaluationName;
+    if (plan.data.evaluations[itemIndex].unitName) {
+      evaluationName += ` - ${plan.data.evaluations[itemIndex].unitName}`;
+    }
+  }
+  
+  container.innerHTML = `
+    <h4>${evaluationName}</h4>
+    <div class="evaluation-grid">
+      <div class="evaluation-grid-header">
+        <div class="evaluation-grid-cell" style="width: 80px;">번호</div>
+        <div class="evaluation-grid-cell" style="width: 200px;">이름</div>
+        <div class="evaluation-grid-cell">평가 결과</div>
+      </div>
+      ${selectedClass.students.map(student => `
+        <div class="evaluation-grid-row">
+          <div class="evaluation-grid-cell">${student.number}</div>
+          <div class="evaluation-grid-cell">${student.name}</div>
+          <div class="evaluation-grid-cell">
+            <select class="evaluation-select" data-student="${student.name}" onchange="updateEvaluationResult(this)">
+              <option value="">선택</option>
+              <option value="매우잘함">매우잘함</option>
+              <option value="잘함">잘함</option>
+              <option value="보통">보통</option>
+              <option value="노력요함">노력요함</option>
+            </select>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  
+  // Show evaluation actions
+  document.getElementById('evaluation-actions').style.display = 'block';
+  updateEvaluationProgress();
+  
+  // Load existing results if any
+  loadExistingEvaluationResults();
+}
+
+function updateEvaluationResult(select) {
+  const studentName = select.getAttribute('data-student');
+  const result = select.value;
+  
+  if (!currentEvaluationResults[studentName]) {
+    currentEvaluationResults[studentName] = {};
+  }
+  
+  currentEvaluationResults[studentName] = {
+    number: selectedClass.students.find(s => s.name === studentName).number,
+    result: result
+  };
+  
+  updateEvaluationProgress();
+  
+  // Update select background color based on result
+  select.setAttribute('value', result);
+}
+
+function updateEvaluationProgress() {
+  const totalStudents = selectedClass.students.length;
+  const completedEvaluations = Object.keys(currentEvaluationResults).filter(
+    studentName => currentEvaluationResults[studentName].result
+  ).length;
+  
+  document.getElementById('evaluation-progress').textContent = 
+    `${completedEvaluations}/${totalStudents} 명 평가 완료`;
+  
+  // Enable/disable save button
+  const saveButton = document.getElementById('save-evaluation-btn');
+  if (completedEvaluations === totalStudents) {
+    saveButton.disabled = false;
+  } else {
+    saveButton.disabled = true;
+  }
+}
+
+function loadExistingEvaluationResults() {
+  const className = selectedClass.className;
+  const planId = selectedEvaluationPlan.id;
+  
+  google.script.run
+    .withSuccessHandler(function(results) {
+      if (results.length > 0) {
+        const plan = selectedEvaluationPlan;
+        let evaluationName = '전체 평가';
+        
+        if (plan.data.evaluations && plan.data.evaluations[selectedEvaluationItem]) {
+          evaluationName = plan.data.evaluations[selectedEvaluationItem].evaluationName;
+          if (plan.data.evaluations[selectedEvaluationItem].unitName) {
+            evaluationName += `_${plan.data.evaluations[selectedEvaluationItem].unitName}`;
+          }
+        }
+        
+        const matchingResult = results.find(r => r.data.evaluationName === evaluationName);
+        if (matchingResult) {
+          // Apply existing results
+          Object.entries(matchingResult.data.results).forEach(([studentName, data]) => {
+            const select = document.querySelector(`select[data-student="${studentName}"]`);
+            if (select) {
+              select.value = data.result;
+              select.setAttribute('value', data.result);
+              updateEvaluationResult(select);
+            }
+          });
+        }
+      }
+    })
+    .withFailureHandler(handleError)
+    .getEvaluationResults(className, planId);
+}
+
+function goToNextEvaluationStep() {
+  if (currentEvaluationStep < 4 && canProceedToNextStep(currentEvaluationStep)) {
+    setActiveEvaluationStep(currentEvaluationStep + 1);
+  }
+}
+
+function goToPreviousEvaluationStep() {
+  if (currentEvaluationStep > 1) {
+    setActiveEvaluationStep(currentEvaluationStep - 1);
+  }
+}
+
+// Enhanced save evaluation results function
+function saveEvaluationResults() {
+  if (!selectedClass || !selectedEvaluationPlan || selectedEvaluationItem === null) {
+    showMessage('평가 정보가 완전하지 않습니다.', 'error');
+    return;
+  }
+  
+  const plan = selectedEvaluationPlan;
+  let evaluationName = '전체 평가';
+  
+  if (plan.data.evaluations && plan.data.evaluations[selectedEvaluationItem]) {
+    evaluationName = plan.data.evaluations[selectedEvaluationItem].evaluationName;
+    if (plan.data.evaluations[selectedEvaluationItem].unitName) {
+      evaluationName += `_${plan.data.evaluations[selectedEvaluationItem].unitName}`;
+    }
+  }
+  
+  const evaluationData = {
+    className: selectedClass.className,
+    evaluationPlanId: plan.id,
+    evaluationName: evaluationName,
+    results: currentEvaluationResults
+  };
+  
+  showLoading('평가 결과를 저장하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage(`${result.resultCount}명의 평가 결과가 저장되었습니다.`, 'success');
+        // Reset results after successful save
+        currentEvaluationResults = {};
+        updateEvaluationProgress();
+      } else {
+        showMessage('저장 실패: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .saveEvaluationResults(evaluationData);
+}
+
+function autoSaveEvaluation() {
+  // Auto-save functionality - temporary save
+  showMessage('임시 저장 기능은 추가 예정입니다.', 'info');
+}
+
+// Legacy functions for backward compatibility
+function loadClassStudents() {
+  // This function is now handled by onClassSelected()
+  console.log('loadClassStudents called - handled by enhanced system');
+}
+
+function loadEvaluationCriteria() {
+  // This function is now handled by selectEvaluationPlan()
+  console.log('loadEvaluationCriteria called - handled by enhanced system');
+}
+
+function loadExistingResults() {
+  // This function is now handled by loadExistingEvaluationResults()
+  console.log('loadExistingResults called - handled by enhanced system');
+}
+
+function displayEvaluationGrid() {
+  // This function is now handled by loadEvaluationGrid()
+  console.log('displayEvaluationGrid called - handled by enhanced system');
+}
+
+function applyExistingResults(results) {
+  // This function is now handled by loadExistingEvaluationResults()
+  console.log('applyExistingResults called - handled by enhanced system');
+}
+
+// History Functions
+function loadHistory() {
+  const filters = {
+    studentName: document.getElementById('history-search').value.trim(),
+    type: document.getElementById('history-type').value,
+    limit: 50
+  };
+
+  showLoading('기록을 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(history) {
+      hideLoading();
+      displayHistory(history);
+    })
+    .withFailureHandler(handleError)
+    .getGeneratedContentHistory(filters);
+}
+
+function displayHistory(history) {
+  const container = document.getElementById('history-list');
+  
+  if (history.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <i class="material-icons">history</i>
+        <p>작성 기록이 없습니다.</p>
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = history.map(item => `
+    <div class="history-item">
+      <div class="history-header">
+        <div>
+          <strong>${item.data.studentName}</strong> - ${item.data.type}
+          ${item.data.subject ? `(${item.data.subject})` : ''}
+        </div>
+        <div class="history-meta">
+          ${new Date(item.data.generatedAt).toLocaleString()}
+        </div>
+      </div>
+      <div class="history-content">
+        ${item.data.content}
+      </div>
+      <div class="history-actions">
+        <button class="btn btn-small" onclick="copyHistoryContent('${item.id}')">
+          <i class="material-icons">content_copy</i>
+          복사
+        </button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function copyHistoryContent(historyId) {
+  // Find the content
+  const historyItem = document.querySelector(`[onclick="copyHistoryContent('${historyId}')"]`)
+    .closest('.history-item')
+    .querySelector('.history-content')
+    .textContent;
+    
+  navigator.clipboard.writeText(historyItem).then(() => {
+    showMessage('클립보드에 복사되었습니다.', 'success');
+  });
+}
+
+// Survey Generation Functions
+let currentSurveyPlan = null;
+let currentSurveyQuestions = null;
+
+function loadEvaluationPlansForSurvey() {
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      try {
+        const plans = JSON.parse(jsonString || '[]');
+        const select = document.getElementById('survey-evaluation-plan');
+        select.innerHTML = '<option value="">평가계획을 선택하세요</option>';
+        
+        plans.forEach(plan => {
+          const option = document.createElement('option');
+          option.value = plan.id;
+          option.textContent = `${plan.data.subject} - ${plan.data.grade} ${plan.data.semester}`;
+          option.dataset.plan = JSON.stringify(plan.data);
+          select.appendChild(option);
+        });
+        
+        // Add change listener
+        select.addEventListener('change', function() {
+          if (this.value) {
+            const selectedOption = this.options[this.selectedIndex];
+            currentSurveyPlan = JSON.parse(selectedOption.dataset.plan);
+            displayPlanPreview(currentSurveyPlan);
+          } else {
+            currentSurveyPlan = null;
+            document.getElementById('selected-plan-preview').style.display = 'none';
+          }
+        });
+      } catch (error) {
+        console.error('Error parsing evaluation plans:', error);
+        showMessage('평가계획을 불러오는 중 오류가 발생했습니다.', 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      console.error('Failed to load evaluation plans:', error);
+      showMessage('평가계획을 불러올 수 없습니다.', 'error');
+    })
+    .getEvaluationPlansJSON();
+}
+
+function displayPlanPreview(plan) {
+  const preview = document.getElementById('selected-plan-preview');
+  
+  // Get achievement standards from new or old format
+  let achievementStandards = [];
+  if (plan.evaluations && Array.isArray(plan.evaluations)) {
+    // New format - collect all achievement standards from all evaluations
+    plan.evaluations.forEach(evaluation => {
+      if (evaluation.achievementStandards && Array.isArray(evaluation.achievementStandards)) {
+        achievementStandards = achievementStandards.concat(evaluation.achievementStandards);
+      }
+    });
+  } else if (plan.achievementStandards && Array.isArray(plan.achievementStandards)) {
+    // Old format
+    achievementStandards = plan.achievementStandards;
+  }
+  
+  preview.innerHTML = `
+    <h4>선택된 평가계획</h4>
+    <p><strong>과목:</strong> ${plan.subject}</p>
+    <p><strong>학년/학기:</strong> ${plan.grade} ${plan.semester}</p>
+    ${achievementStandards.length > 0 ? `
+      <p><strong>성취기준:</strong></p>
+      <ul>
+        ${achievementStandards.map(std => `<li>${std}</li>`).join('')}
+      </ul>
+    ` : ''}
+  `;
+  preview.style.display = 'block';
+}
+
+function generateSurveyQuestions() {
+  if (!currentSurveyPlan) {
+    showMessage('평가계획을 먼저 선택해주세요.', 'error');
+    return;
+  }
+  
+  showLoading('AI가 자기평가 설문을 생성하는 중...');
+  
+  // Prepare evaluation plan data for server
+  let planDataForServer = {
+    subject: currentSurveyPlan.subject,
+    grade: currentSurveyPlan.grade,
+    semester: currentSurveyPlan.semester
+  };
+  
+  // Extract achievement standards from new or old format
+  if (currentSurveyPlan.evaluations && Array.isArray(currentSurveyPlan.evaluations)) {
+    // New format - collect all achievement standards
+    let allStandards = [];
+    let evaluationCriteria = {};
+    
+    currentSurveyPlan.evaluations.forEach(evaluation => {
+      if (evaluation.achievementStandards && Array.isArray(evaluation.achievementStandards)) {
+        allStandards = allStandards.concat(evaluation.achievementStandards);
+      }
+      // Use the first evaluation's criteria if available
+      if (!evaluationCriteria.excellent && evaluation.evaluationCriteria) {
+        evaluationCriteria = evaluation.evaluationCriteria;
+      }
+    });
+    
+    planDataForServer.achievementStandards = allStandards;
+    planDataForServer.evaluationCriteria = evaluationCriteria;
+  } else {
+    // Old format
+    planDataForServer.achievementStandards = currentSurveyPlan.achievementStandards || [];
+    planDataForServer.evaluationCriteria = currentSurveyPlan.evaluationCriteria || {};
+  }
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        currentSurveyQuestions = result.questions;
+        displaySurveyQuestions(result.questions);
+        document.getElementById('survey-result').style.display = 'block';
+        showMessage('자기평가 설문이 생성되었습니다.', 'success');
+      } else {
+        showMessage('설문 생성 중 오류가 발생했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .generateSelfEvaluationQuestions(planDataForServer);
+}
+
+function displaySurveyQuestions(questions) {
+  const preview = document.getElementById('survey-preview');
+  
+  let html = `
+    <div class="survey-section">
+      <h3>객관식 문항</h3>
+  `;
+  
+  // Multiple choice questions
+  if (questions.multipleChoice && questions.multipleChoice.length > 0) {
+    questions.multipleChoice.forEach((q, index) => {
+      html += `
+        <div class="survey-question">
+          <div class="question-number">문항 ${index + 1}</div>
+          <div class="question-text">${q.question}</div>
+          <div class="question-options">
+            ${q.options.map((opt, i) => `
+              <div class="question-option">
+                <input type="radio" name="q${index}" id="q${index}_${i}">
+                <label for="q${index}_${i}">${opt}</label>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    });
+  }
+  
+  html += `
+    </div>
+    <div class="survey-section">
+      <h3>주관식 문항</h3>
+  `;
+  
+  // Short answer questions
+  if (questions.shortAnswer && questions.shortAnswer.length > 0) {
+    questions.shortAnswer.forEach((q, index) => {
+      html += `
+        <div class="survey-question">
+          <div class="question-number">문항 ${questions.multipleChoice.length + index + 1}</div>
+          <div class="question-text">${q.question}</div>
+          <textarea class="form-control" rows="3" placeholder="답변을 입력하세요"></textarea>
+          ${q.guideline ? `<div class="question-guideline">${q.guideline}</div>` : ''}
+        </div>
+      `;
+    });
+  }
+  
+  html += '</div>';
+  preview.innerHTML = html;
+}
+
+function saveSurveyQuestions() {
+  if (!currentSurveyQuestions || !currentSurveyPlan) {
+    showMessage('저장할 설문이 없습니다.', 'error');
+    return;
+  }
+  
+  const surveyData = {
+    planId: document.getElementById('survey-evaluation-plan').value,
+    subject: currentSurveyPlan.subject,
+    grade: currentSurveyPlan.grade,
+    semester: currentSurveyPlan.semester,
+    questions: currentSurveyQuestions,
+    createdAt: new Date().toISOString()
+  };
+  
+  showLoading('설문 저장 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage('설문이 저장되었습니다.', 'success');
+      } else {
+        showMessage('저장 중 오류가 발생했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .saveSurveyQuestions(surveyData);
+}
+
+function exportToGoogleForms() {
+  if (!currentSurveyQuestions || !currentSurveyPlan) {
+    showMessage('내보낼 설문이 없습니다.', 'error');
+    return;
+  }
+  
+  const surveyData = {
+    subject: currentSurveyPlan.subject,
+    grade: currentSurveyPlan.grade,
+    semester: currentSurveyPlan.semester,
+    questions: currentSurveyQuestions
+  };
+  
+  showLoading('Google Forms 생성 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage('Google Form이 생성되었습니다.', 'success');
+        
+        // Show form URLs
+        const message = `
+          <div style="padding: 1rem;">
+            <p style="margin-bottom: 0.5rem;"><strong>Google Form이 생성되었습니다!</strong></p>
+            <p style="margin-bottom: 0.5rem;">
+              <a href="${result.formUrl}" target="_blank" style="color: #1a73e8;">
+                학생용 설문 링크 열기 →
+              </a>
+            </p>
+            <p style="margin-bottom: 0;">
+              <a href="${result.editUrl}" target="_blank" style="color: #1a73e8;">
+                설문 편집 페이지 열기 →
+              </a>
+            </p>
+          </div>
+        `;
+        
+        // Create modal to show links
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+          position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          background: white;
+          padding: 2rem;
+          border-radius: 8px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+          z-index: 3001;
+          max-width: 400px;
+        `;
+        modal.innerHTML = message + `
+          <button onclick="this.parentElement.remove()" 
+            style="margin-top: 1rem; padding: 0.5rem 1rem; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer;">
+            닫기
+          </button>
+        `;
+        document.body.appendChild(modal);
+      } else {
+        showMessage('Form 생성 중 오류가 발생했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(handleError)
+    .createGoogleForm(surveyData);
+}
+
+function regenerateSurvey() {
+  if (currentSurveyPlan) {
+    generateSurveyQuestions();
+  }
+}
+
+// Forms Management Functions
+function loadUserForms() {
+  showLoading('Forms 목록을 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(forms) {
+      hideLoading();
+      displayUserForms(forms);
+    })
+    .withFailureHandler(handleError)
+    .getUserForms();
+}
+
+function displayUserForms(forms) {
+  const container = document.getElementById('user-forms-list');
+  
+  if (forms.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <i class="material-icons">description</i>
+        <p>생성된 Google Form이 없습니다.</p>
+      </div>
+    `;
+    return;
+  }
+  
+  container.innerHTML = forms.map(form => `
+    <div class="form-item">
+      <div class="form-info">
+        <div class="form-title">${form.subject} - ${form.grade} ${form.semester}</div>
+        <div class="form-meta">
+          <a href="${form.formUrl}" target="_blank">설문 링크</a> | 
+          <a href="${form.editUrl}" target="_blank">편집</a>
+        </div>
+      </div>
+      <div class="form-actions">
+        <span class="response-count">응답 ${form.responseCount || 0}개</span>
+        <button class="btn btn-small" onclick="syncFormResponses('${form.formId}', this)">
+          <i class="material-icons">sync</i>
+          응답 동기화
+        </button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function syncFormResponses(formId, buttonElement) {
+  // Show syncing status
+  const originalContent = buttonElement.innerHTML;
+  buttonElement.innerHTML = '<i class="material-icons">sync</i> 동기화 중...';
+  buttonElement.disabled = true;
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      buttonElement.innerHTML = originalContent;
+      buttonElement.disabled = false;
+      
+      if (result.success) {
+        // Show sync status
+        const statusDiv = document.createElement('div');
+        statusDiv.className = 'sync-status success';
+        statusDiv.innerHTML = `
+          <i class="material-icons">check_circle</i>
+          ${result.syncCount}개 동기화 완료
+        `;
+        
+        buttonElement.parentElement.appendChild(statusDiv);
+        
+        // Remove status after 3 seconds
+        setTimeout(() => {
+          statusDiv.remove();
+        }, 3000);
+        
+        showMessage(`${result.syncCount}개의 응답이 동기화되었습니다.`, 'success');
+      } else {
+        showMessage('동기화 중 오류가 발생했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      buttonElement.innerHTML = originalContent;
+      buttonElement.disabled = false;
+      handleError(error);
+    })
+    .syncFormResponses(formId);
+}
+
+// Utility Functions
+function showLoading(message = '처리 중...') {
+  document.getElementById('loading-message').textContent = message;
+  document.getElementById('loading').classList.add('active');
+}
+
+function hideLoading() {
+  document.getElementById('loading').classList.remove('active');
+}
+
+function showMessage(message, type = 'info') {
+  // Create message element
+  const messageDiv = document.createElement('div');
+  messageDiv.style.cssText = `
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 1rem 1.5rem;
+    background-color: ${type === 'success' ? '#1e7e34' : type === 'error' ? '#c5221f' : '#1a73e8'};
+    color: white;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    z-index: 3000;
+    animation: slideIn 0.3s ease-out;
+  `;
+  messageDiv.textContent = message;
+  
+  document.body.appendChild(messageDiv);
+  
+  // Remove after 3 seconds
+  setTimeout(() => {
+    messageDiv.style.animation = 'slideOut 0.3s ease-out';
+    setTimeout(() => {
+      document.body.removeChild(messageDiv);
+    }, 300);
+  }, 3000);
+}
+
+function handleError(error) {
+  hideLoading();
+  console.error(error);
+  showMessage('오류가 발생했습니다: ' + error.toString(), 'error');
+}
+
+// Add CSS animations
+const style = document.createElement('style');
+style.textContent = `
+  @keyframes slideIn {
+    from {
+      transform: translateX(100%);
+      opacity: 0;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
+  }
+  
+  @keyframes slideOut {
+    from {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    to {
+      transform: translateX(100%);
+      opacity: 0;
+    }
+  }
+`;
+
+// Add new test functions
+function testSimpleArray() {
+  showLoading('간단한 배열 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      console.log('testSimpleArrayReturn 결과:', result);
+      
+      if (result && Array.isArray(result)) {
+        showMessage(`간단한 배열 테스트 성공: ${result.length}개 항목`, 'success');
+      } else {
+        showMessage(`간단한 배열 테스트 실패: ${typeof result}`, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('간단한 배열 테스트 오류:', error);
+      showMessage('간단한 배열 테스트 오류: ' + error, 'error');
+    })
+    .testSimpleArrayReturn();
+}
+
+function testEnvironmentFunction() {
+  showLoading('환경 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      console.log('Environment test result:', result);
+      
+      if (result && result.success) {
+        showMessage('환경 테스트 성공', 'success');
+        
+        // Show detailed results
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+          position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          background: white;
+          padding: 2rem;
+          border-radius: 8px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+          z-index: 3001;
+          max-width: 600px;
+        `;
+        modal.innerHTML = `
+          <h3>환경 테스트 결과</h3>
+          <p><strong>시간:</strong> ${result.time}</p>
+          <p><strong>DriveApp 사용 가능:</strong> ${result.driveAppAvailable}</p>
+          <p><strong>실행 사용자:</strong> ${result.scriptUser || 'N/A'}</p>
+          <button onclick="this.parentElement.remove()" 
+            style="margin-top: 1rem; padding: 0.5rem 1rem; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer;">
+            닫기
+          </button>
+        `;
+        document.body.appendChild(modal);
+      } else {
+        showMessage('환경 테스트 실패', 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('환경 테스트 오류:', error);
+      showMessage('환경 테스트 오류: ' + error, 'error');
+    })
+    .testEnvironment();
+}
+
+function debugEvaluationPlans() {
+  showLoading('평가계획 디버깅 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      console.log('Debug result:', result);
+      
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: white;
+        padding: 2rem;
+        border-radius: 8px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+        z-index: 3001;
+        max-width: 600px;
+        max-height: 80vh;
+        overflow-y: auto;
+      `;
+      
+      let content = '<h3>평가계획 디버그 결과</h3>';
+      
+      if (result.error) {
+        content += `<p style="color: red;">오류: ${result.error}</p>`;
+      } else {
+        content += `
+          <p><strong>직접 호출 결과:</strong> ${result.directResult ? 
+            (Array.isArray(result.directResult) ? `배열 (${result.directResult.length}개)` : typeof result.directResult) 
+            : 'null/undefined'}</p>
+          <p><strong>Safe 호출 결과:</strong> ${result.safeResult ? 
+            (Array.isArray(result.safeResult) ? `배열 (${result.safeResult.length}개)` : typeof result.safeResult) 
+            : 'null/undefined'}</p>
+          <p><strong>간단한 테스트:</strong> ${result.simpleTest ? 
+            (Array.isArray(result.simpleTest) ? `배열 (${result.simpleTest.length}개)` : typeof result.simpleTest) 
+            : 'null/undefined'}</p>
+          <p><strong>타임스탬프:</strong> ${result.timestamp}</p>
+          <details>
+            <summary>전체 결과 (JSON)</summary>
+            <pre style="overflow-x: auto; background: #f5f5f5; padding: 10px; border-radius: 4px;">${JSON.stringify(result, null, 2)}</pre>
+          </details>
+        `;
+      }
+      
+      content += `
+        <button onclick="this.parentElement.remove()" 
+          style="margin-top: 1rem; padding: 0.5rem 1rem; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer;">
+          닫기
+        </button>
+      `;
+      
+      modal.innerHTML = content;
+      document.body.appendChild(modal);
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('디버그 오류:', error);
+      showMessage('디버그 오류: ' + error, 'error');
+    })
+    .debugGetEvaluationPlans();
+}
+
+// Add comprehensive test function
+function runAllTests() {
+  showLoading('모든 테스트 실행 중...');
+  
+  const tests = [
+    { name: 'testStringReturn', expected: 'string' },
+    { name: 'testNumberReturn', expected: 'number' },
+    { name: 'testObjectReturn', expected: 'object' },
+    { name: 'testSimpleArrayReturn', expected: 'array' },
+    { name: 'testEnvironment', expected: 'object' },
+    { name: 'getEvaluationPlansSafe', expected: 'array' }
+  ];
+  
+  let testResults = [];
+  let currentTest = 0;
+  
+  function runNextTest() {
+    if (currentTest >= tests.length) {
+      hideLoading();
+      showTestResults(testResults);
+      return;
+    }
+    
+    const test = tests[currentTest];
+    console.log(`Running test: ${test.name}`);
+    
+    google.script.run
+      .withSuccessHandler(function(result) {
+        console.log(`${test.name} result:`, result);
+        
+        let success = false;
+        let resultType = typeof result;
+        let resultDetails = '';
+        
+        if (test.expected === 'array') {
+          success = Array.isArray(result);
+          resultType = success ? 'array' : resultType;
+          if (!success && result && typeof result === 'object') {
+            // Log object properties if it's not an array
+            resultDetails = Object.keys(result).join(', ');
+          }
+        } else {
+          success = (resultType === test.expected);
+        }
+        
+        testResults.push({
+          name: test.name,
+          success: success,
+          expected: test.expected,
+          actual: resultType,
+          result: result,
+          details: resultDetails
+        });
+        
+        currentTest++;
+        runNextTest();
+      })
+      .withFailureHandler(function(error) {
+        console.error(`${test.name} error:`, error);
+        testResults.push({
+          name: test.name,
+          success: false,
+          expected: test.expected,
+          actual: 'error',
+          error: error.toString()
+        });
+        
+        currentTest++;
+        runNextTest();
+      })[test.name]();
+  }
+  
+  runNextTest();
+}
+
+function showTestResults(results) {
+  const modal = document.createElement('div');
+  modal.style.cssText = `
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: white;
+    padding: 2rem;
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+    z-index: 3001;
+    max-width: 800px;
+    max-height: 80vh;
+    overflow-y: auto;
+  `;
+  
+  let content = '<h3>테스트 결과</h3><table style="width: 100%; border-collapse: collapse; margin-top: 1rem;">';
+  content += '<tr style="background: #f5f5f5;"><th style="padding: 8px; text-align: left;">테스트</th><th>예상</th><th>실제</th><th>결과</th></tr>';
+  
+  results.forEach(test => {
+    const icon = test.success ? '✅' : '❌';
+    const rowColor = test.success ? '' : 'background: #ffebee;';
+    content += `
+      <tr style="${rowColor}">
+        <td style="padding: 8px; border-top: 1px solid #ddd;">${test.name}</td>
+        <td style="padding: 8px; border-top: 1px solid #ddd;">${test.expected}</td>
+        <td style="padding: 8px; border-top: 1px solid #ddd;">${test.actual}</td>
+        <td style="padding: 8px; border-top: 1px solid #ddd;">${icon}</td>
+      </tr>
+    `;
+    if (test.error) {
+      content += `<tr style="${rowColor}"><td colspan="4" style="padding: 8px; color: red;">Error: ${test.error}</td></tr>`;
+    }
+    if (test.details) {
+      content += `<tr style="${rowColor}"><td colspan="4" style="padding: 8px; color: #666;">Object keys: ${test.details}</td></tr>`;
+    }
+  });
+  
+  content += '</table>';
+  
+  const successCount = results.filter(r => r.success).length;
+  content += `<p style="margin-top: 1rem;"><strong>성공: ${successCount}/${results.length}</strong></p>`;
+  
+  content += `
+    <button onclick="this.parentElement.remove()" 
+      style="margin-top: 1rem; padding: 0.5rem 1rem; background: #1a73e8; color: white; border: none; border-radius: 4px; cursor: pointer;">
+      닫기
+    </button>
+  `;
+  
+  modal.innerHTML = content;
+  document.body.appendChild(modal);
+}
+
+document.head.appendChild(style);
+
+// 새로운 테스트 함수들
+function testBasicFunction() {
+  showLoading('기본 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      console.log('testBasicReturn result:', result);
+      
+      if (result && Array.isArray(result)) {
+        showMessage(`기본 테스트 성공: ${result.length}개 항목 반환됨`, 'success');
+      } else {
+        showMessage(`기본 테스트 실패: ${typeof result} 타입 반환됨`, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('testBasicReturn error:', error);
+      showMessage('기본 테스트 오류: ' + error, 'error');
+    })
+    .testBasicReturn();
+}
+
+function testEmptyArrayFunction() {
+  showLoading('빈 배열 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      console.log('testEmptyArray result:', result);
+      
+      if (result && Array.isArray(result) && result.length === 0) {
+        showMessage('빈 배열 테스트 성공', 'success');
+      } else {
+        showMessage(`빈 배열 테스트 실패: ${typeof result} 타입, ${result ? result.length : 'null'}개 항목`, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('testEmptyArray error:', error);
+      showMessage('빈 배열 테스트 오류: ' + error, 'error');
+    })
+    .testEmptyArray();
+}
+
+function testSimplePlans() {
+  showLoading('단순 평가계획 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      console.log('getEvaluationPlansSimple result:', result);
+      
+      if (result !== null && result !== undefined) {
+        showMessage(`단순 평가계획 테스트 성공: ${Array.isArray(result) ? '배열' : typeof result} 반환됨`, 'success');
+      } else {
+        showMessage('단순 평가계획 테스트 실패: null 반환됨', 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('getEvaluationPlansSimple error:', error);
+      showMessage('단순 평가계획 테스트 오류: ' + error, 'error');
+    })
+    .getEvaluationPlansSimple();
+}
+
+function testHardcodedPlans() {
+  showLoading('하드코딩된 평가계획 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      console.log('getHardcodedEvaluationPlans result:', result);
+      
+      if (result && Array.isArray(result) && result.length > 0) {
+        showMessage(`하드코딩 평가계획 테스트 성공: ${result.length}개 항목`, 'success');
+        // 결과를 표시해보기
+        displayEvaluationPlans(result);
+      } else {
+        showMessage('하드코딩 평가계획 테스트 실패', 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('getHardcodedEvaluationPlans error:', error);
+      showMessage('하드코딩 평가계획 테스트 오류: ' + error, 'error');
+    })
+    .getHardcodedEvaluationPlans();
+}
+
+function testJSONPlans() {
+  showLoading('JSON 평가계획 테스트 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      hideLoading();
+      console.log('Received JSON string:', jsonString);
+      
+      try {
+        const plans = JSON.parse(jsonString);
+        console.log('Parsed plans:', plans);
+        
+        if (Array.isArray(plans)) {
+          showMessage(`JSON 파싱 성공: ${plans.length}개 평가계획`, 'success');
+          displayEvaluationPlans(plans);
+        } else {
+          showMessage('JSON 파싱 실패: 배열이 아님', 'error');
+        }
+      } catch (error) {
+        console.error('JSON parse error:', error);
+        showMessage('JSON 파싱 오류: ' + error, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('getEvaluationPlansJSON error:', error);
+      showMessage('JSON 테스트 오류: ' + error, 'error');
+    })
+    .getEvaluationPlansJSON();
+}
+
+// 평가계획을 다시 로드하는 새로운 방법
+function reloadEvaluationPlans() {
+  showLoading('평가계획 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      hideLoading();
+      console.log('Received JSON:', jsonString);
+      
+      try {
+        const plans = JSON.parse(jsonString || '[]');
+        displayEvaluationPlans(plans);
+        
+        if (plans.length === 0) {
+          showMessage('저장된 평가계획이 없습니다.', 'info');
+        }
+      } catch (error) {
+        console.error('JSON parse error:', error);
+        displayEvaluationPlans([]);
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      console.error('Failed to load plans:', error);
+      handleError(error);
+    })
+    .getEvaluationPlansJSON();
+}
+
+// Toggle subject fields for individual generation
+function toggleSubjectFields() {
+  const recordType = document.getElementById('record-type').value;
+  const subjectGroup = document.getElementById('subject-group');
+  const activityGroup = document.getElementById('activity-type-group');
+  
+  if (recordType === '교과학습발달상황') {
+    subjectGroup.style.display = 'block';
+    activityGroup.style.display = 'none';
+  } else if (recordType === '창의적체험활동') {
+    subjectGroup.style.display = 'none';
+    activityGroup.style.display = 'block';
+  } else {
+    subjectGroup.style.display = 'none';
+    activityGroup.style.display = 'none';
+  }
+}
+
+// ===== Batch Generation Functions =====
+
+// Global variables for batch generation
+let batchGenerationData = {
+  recordType: '',
+  subject: '',
+  activityType: '',
+  className: '',
+  students: [],
+  evaluationPlan: null,
+  selfEvaluation: null,
+  results: {}
+};
+
+// Switch between individual and batch modes
+function switchGenerationMode(mode) {
+  const individualMode = document.getElementById('individual-mode');
+  const batchMode = document.getElementById('batch-mode');
+  const tabs = document.querySelectorAll('.generation-tabs .tab-btn');
+  
+  // Update tab states
+  tabs.forEach(tab => tab.classList.remove('active'));
+  document.querySelector(`[onclick="switchGenerationMode('${mode}')"]`).classList.add('active');
+  
+  // Show/hide modes
+  if (mode === 'individual') {
+    individualMode.classList.add('active');
+    batchMode.classList.remove('active');
+  } else {
+    individualMode.classList.remove('active');
+    batchMode.classList.add('active');
+    
+    // Load classes for batch mode
+    loadBatchClasses();
+  }
+}
+
+// Load classes for batch generation
+function loadBatchClasses() {
+  google.script.run
+    .withSuccessHandler(function(classes) {
+      const select = document.getElementById('batch-class-select');
+      select.innerHTML = '<option value="">학급을 선택하세요</option>';
+      
+      if (classes && classes.length > 0) {
+        classes.forEach(classData => {
+          const option = document.createElement('option');
+          option.value = classData.className;
+          option.textContent = `${classData.className} (${classData.students.length}명)`;
+          select.appendChild(option);
+        });
+      }
+    })
+    .withFailureHandler(handleError)
+    .getAllClasses();
+}
+
+// Toggle subject fields for batch mode
+function toggleBatchSubjectFields() {
+  const recordType = document.getElementById('batch-record-type').value;
+  const subjectGroup = document.getElementById('batch-subject-group');
+  const activityGroup = document.getElementById('batch-activity-type-group');
+  const evaluationSection = document.getElementById('batch-evaluation-section');
+  
+  if (recordType === '교과학습발달상황') {
+    subjectGroup.style.display = 'block';
+    activityGroup.style.display = 'none';
+    evaluationSection.style.display = 'block';
+  } else if (recordType === '창의적체험활동') {
+    subjectGroup.style.display = 'none';
+    activityGroup.style.display = 'block';
+    evaluationSection.style.display = 'none';
+  } else {
+    subjectGroup.style.display = 'none';
+    activityGroup.style.display = 'none';
+    evaluationSection.style.display = 'none';
+  }
+}
+
+// Load students for selected class
+function loadBatchClassStudents() {
+  const className = document.getElementById('batch-class-select').value;
+  if (!className) return;
+  
+  showLoading('학생 정보를 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(classData) {
+      hideLoading();
+      if (classData && classData.students) {
+        batchGenerationData.students = classData.students;
+        batchGenerationData.className = className;
+        
+        // Load evaluation plans for batch mode
+        loadBatchEvaluationPlans();
+        loadBatchSelfEvaluations();
+      }
+    })
+    .withFailureHandler(handleError)
+    .getClassRoster(className);
+}
+
+// Load evaluation plans for batch mode
+function loadBatchEvaluationPlans() {
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      const select = document.getElementById('batch-evaluation-plan');
+      select.innerHTML = '<option value="">선택하세요 (선택사항)</option>';
+      
+      try {
+        const plans = JSON.parse(jsonString || '[]');
+        plans.forEach(plan => {
+          const option = document.createElement('option');
+          option.value = plan.id;
+          option.textContent = `${plan.data.subject} - ${plan.data.grade} ${plan.data.semester}`;
+          select.appendChild(option);
+        });
+      } catch (error) {
+        console.error('Error parsing evaluation plans:', error);
+      }
+    })
+    .withFailureHandler(handleError)
+    .getEvaluationPlansJSON();
+}
+
+// Load self evaluations for batch mode
+function loadBatchSelfEvaluations() {
+  if (!batchGenerationData.className) {
+    return;
+  }
+  
+  google.script.run
+    .withSuccessHandler(function(evaluations) {
+      const select = document.getElementById('batch-self-evaluation');
+      select.innerHTML = '<option value="">선택하세요 (선택사항)</option>';
+      
+      // Store all evaluations for individual student matching
+      batchGenerationData.classEvaluations = evaluations || [];
+      
+      if (evaluations && evaluations.length > 0) {
+        // Group evaluations by subject
+        const evaluationsBySubject = {};
+        evaluations.forEach(evaluation => {
+          const subject = evaluation.data.subject || '기타';
+          if (!evaluationsBySubject[subject]) {
+            evaluationsBySubject[subject] = [];
+          }
+          evaluationsBySubject[subject].push(evaluation);
+        });
+        
+        // Add general options (apply to all students)
+        const generalGroup = document.createElement('optgroup');
+        generalGroup.label = '전체 적용';
+        
+        Object.keys(evaluationsBySubject).forEach(subject => {
+          const option = document.createElement('option');
+          option.value = `subject:${subject}`;
+          option.textContent = `${subject} 과목 최신 평가`;
+          generalGroup.appendChild(option);
+        });
+        
+        if (Object.keys(evaluationsBySubject).length > 0) {
+          select.appendChild(generalGroup);
+        }
+        
+        // Add individual evaluations for manual selection
+        Object.keys(evaluationsBySubject).forEach(subject => {
+          const optgroup = document.createElement('optgroup');
+          optgroup.label = `${subject} - 개별 선택`;
+          
+          evaluationsBySubject[subject].forEach(evaluation => {
+            const option = document.createElement('option');
+            option.value = evaluation.id;
+            const date = new Date(evaluation.data.submittedAt || evaluation.createdDate).toLocaleDateString();
+            option.textContent = `${evaluation.data.studentName} - ${date}`;
+            optgroup.appendChild(option);
+          });
+          
+          select.appendChild(optgroup);
+        });
+      }
+    })
+    .withFailureHandler(handleError)
+    .getClassSelfEvaluations(batchGenerationData.className);
+}
+
+// Setup batch generation table
+function setupBatchGeneration() {
+  const recordType = document.getElementById('batch-record-type').value;
+  const subject = document.getElementById('batch-subject').value;
+  const activityType = document.getElementById('batch-activity-type').value;
+  const className = document.getElementById('batch-class-select').value;
+  
+  if (!recordType || !className) {
+    showMessage('작성 항목과 학급을 선택해주세요.', 'error');
+    return;
+  }
+  
+  if (recordType === '교과학습발달상황' && !subject) {
+    showMessage('과목을 선택해주세요.', 'error');
+    return;
+  }
+  
+  if (recordType === '창의적체험활동' && !activityType) {
+    showMessage('활동 종류를 선택해주세요.', 'error');
+    return;
+  }
+  
+  // Store batch generation settings
+  batchGenerationData.recordType = recordType;
+  batchGenerationData.subject = subject;
+  batchGenerationData.activityType = activityType;
+  batchGenerationData.className = className;
+  
+  // Get evaluation plan if selected
+  const evaluationPlanId = document.getElementById('batch-evaluation-plan').value;
+  if (evaluationPlanId) {
+    // Load the selected evaluation plan
+    loadSelectedEvaluationPlan(evaluationPlanId);
+  }
+  
+  // Show batch table
+  document.getElementById('batch-generation-table').style.display = 'block';
+  
+  // Generate table rows
+  generateBatchTable();
+  
+  // Scroll to table
+  document.getElementById('batch-generation-table').scrollIntoView({ behavior: 'smooth' });
+}
+
+// Load selected evaluation plan
+function loadSelectedEvaluationPlan(planId) {
+  google.script.run
+    .withSuccessHandler(function(jsonString) {
+      try {
+        const plans = JSON.parse(jsonString || '[]');
+        const plan = plans.find(p => p.id === planId);
+        if (plan) {
+          batchGenerationData.evaluationPlan = plan;
+        }
+      } catch (error) {
+        console.error('Error loading evaluation plan:', error);
+      }
+    })
+    .withFailureHandler(handleError)
+    .getEvaluationPlansJSON();
+}
+
+// Generate batch table with student rows
+function generateBatchTable() {
+  const tableBody = document.getElementById('batch-table-body');
+  tableBody.innerHTML = '';
+  
+  batchGenerationData.students.forEach((student, index) => {
+    const row = document.createElement('tr');
+    row.innerHTML = `
+      <td class="student-number-cell">${student.number}</td>
+      <td class="student-name-cell">${student.name}</td>
+      <td>
+        <textarea 
+          class="observation-input" 
+          id="observation-${index}"
+          placeholder="학생의 구체적인 활동, 성취, 태도 변화 등을 입력하세요"
+          data-student-index="${index}">
+        </textarea>
+      </td>
+      <td>
+        <button 
+          class="generate-btn" 
+          onclick="generateSingleBatch(${index})"
+          id="generate-btn-${index}">
+          생성
+        </button>
+      </td>
+      <td class="result-cell">
+        <div class="result-empty" id="result-${index}">
+          생성 버튼을 클릭하세요
+        </div>
+      </td>
+    `;
+    tableBody.appendChild(row);
+  });
+  
+  // Initialize results object
+  batchGenerationData.results = {};
+}
+
+// Generate content for single student
+function generateSingleBatch(studentIndex) {
+  const student = batchGenerationData.students[studentIndex];
+  const observation = document.getElementById(`observation-${studentIndex}`).value.trim();
+  const generateBtn = document.getElementById(`generate-btn-${studentIndex}`);
+  const resultDiv = document.getElementById(`result-${studentIndex}`);
+  
+  if (!observation) {
+    showMessage('교사 관찰기록을 입력해주세요.', 'error');
+    return;
+  }
+  
+  // Update button state
+  generateBtn.textContent = '생성중...';
+  generateBtn.disabled = true;
+  generateBtn.classList.add('generating');
+  
+  // Update result display
+  resultDiv.innerHTML = '<div class="status-indicator status-generating">생성 중...</div>';
+  
+  // Get student-specific self evaluation if available
+  let studentSelfEvaluation = '';
+  if (batchGenerationData.selfEvaluation) {
+    // Check if it's a subject-based selection (e.g., "subject:수학")
+    if (batchGenerationData.selfEvaluation.startsWith('subject:')) {
+      const selectedSubject = batchGenerationData.selfEvaluation.replace('subject:', '');
+      // Find the student's evaluation for this subject
+      const studentEval = batchGenerationData.classEvaluations?.find(eval => 
+        eval.data.studentName === student.name && 
+        eval.data.subject === selectedSubject
+      );
+      if (studentEval) {
+        studentSelfEvaluation = studentEval.id;
+      }
+    } else {
+      // Direct evaluation ID
+      studentSelfEvaluation = batchGenerationData.selfEvaluation;
+    }
+  }
+  
+  // Prepare generation data (match the format expected by generateSaenggibuContent)
+  const generationData = {
+    type: batchGenerationData.recordType,  // 'type' instead of 'recordType'
+    studentName: student.name,
+    className: batchGenerationData.className,
+    subject: batchGenerationData.subject,
+    activityType: batchGenerationData.activityType,
+    observationNotes: observation,
+    evaluationPlanId: batchGenerationData.evaluationPlan ? batchGenerationData.evaluationPlan.id : '',
+    selfEvaluationId: studentSelfEvaluation
+  };
+  
+  // Call AI generation
+  google.script.run
+    .withSuccessHandler(function(result) {
+      handleBatchGenerationResult(studentIndex, result, true);
+    })
+    .withFailureHandler(function(error) {
+      handleBatchGenerationResult(studentIndex, { success: false, error: error.toString() }, false);
+    })
+    .generateSaenggibuContent(generationData);
+}
+
+// Handle batch generation result
+function handleBatchGenerationResult(studentIndex, result, success) {
+  const generateBtn = document.getElementById(`generate-btn-${studentIndex}`);
+  const resultDiv = document.getElementById(`result-${studentIndex}`);
+  
+  // Reset button state
+  generateBtn.textContent = '생성';
+  generateBtn.disabled = false;
+  generateBtn.classList.remove('generating');
+  
+  if (success && result.success && result.content) {
+    // Store result
+    batchGenerationData.results[studentIndex] = result.content;
+    
+    // Display result
+    const charCount = result.content.length;
+    const charClass = charCount > 500 ? 'error' : charCount > 450 ? 'warning' : '';
+    
+    resultDiv.innerHTML = `
+      <div class="result-content">${result.content}</div>
+      <div class="char-count ${charClass}">${charCount}/500자</div>
+      <div class="result-actions">
+        <button class="result-btn copy" onclick="copyBatchResult(${studentIndex})">복사</button>
+        <button class="result-btn edit" onclick="editBatchResult(${studentIndex})">수정</button>
+        <button class="result-btn regenerate" onclick="generateSingleBatch(${studentIndex})">재생성</button>
+      </div>
+    `;
+    
+    // Display validation warnings if any
+    if (result.validation && result.validation.warnings && result.validation.warnings.length > 0) {
+      const warningsHtml = result.validation.warnings.map(w => `<div class="warning-item">${w}</div>`).join('');
+      resultDiv.innerHTML += `<div class="validation-warnings">${warningsHtml}</div>`;
+    }
+    
+    showMessage(`${batchGenerationData.students[studentIndex].name} 생성 완료`, 'success');
+  } else {
+    // Display error
+    resultDiv.innerHTML = `
+      <div class="status-indicator status-error">
+        생성 실패: ${result.error || '알 수 없는 오류'}
+      </div>
+    `;
+    
+    showMessage(`${batchGenerationData.students[studentIndex].name} 생성 실패`, 'error');
+  }
+}
+
+// Copy batch result to clipboard
+function copyBatchResult(studentIndex) {
+  const content = batchGenerationData.results[studentIndex];
+  if (!content) return;
+  
+  navigator.clipboard.writeText(content).then(() => {
+    showMessage('클립보드에 복사되었습니다.', 'success');
+  }).catch(() => {
+    showMessage('복사에 실패했습니다.', 'error');
+  });
+}
+
+// Edit batch result
+function editBatchResult(studentIndex) {
+  const content = batchGenerationData.results[studentIndex];
+  if (!content) return;
+  
+  const newContent = prompt('내용을 수정하세요:', content);
+  if (newContent !== null && newContent !== content) {
+    batchGenerationData.results[studentIndex] = newContent;
+    
+    // Update display
+    const resultDiv = document.getElementById(`result-${studentIndex}`);
+    const charCount = newContent.length;
+    const charClass = charCount > 500 ? 'error' : charCount > 450 ? 'warning' : '';
+    
+    resultDiv.querySelector('.result-content').textContent = newContent;
+    resultDiv.querySelector('.char-count').textContent = `${charCount}/500자`;
+    resultDiv.querySelector('.char-count').className = `char-count ${charClass}`;
+    
+    showMessage('내용이 수정되었습니다.', 'success');
+  }
+}
+
+// Generate all batch at once
+function generateAllBatch() {
+  const filledObservations = [];
+  
+  // Check which students have observations filled
+  batchGenerationData.students.forEach((student, index) => {
+    const observation = document.getElementById(`observation-${index}`).value.trim();
+    if (observation) {
+      filledObservations.push(index);
+    }
+  });
+  
+  if (filledObservations.length === 0) {
+    showMessage('교사 관찰기록을 입력한 학생이 없습니다.', 'error');
+    return;
+  }
+  
+  if (!confirm(`${filledObservations.length}명의 학생에 대해 생기부를 생성하시겠습니까?`)) {
+    return;
+  }
+  
+  // Show progress bar
+  document.getElementById('batch-progress').style.display = 'block';
+  updateBatchProgress(0, filledObservations.length);
+  
+  let completed = 0;
+  
+  // Generate for each student sequentially to avoid API rate limits
+  function generateNext() {
+    if (completed >= filledObservations.length) {
+      document.getElementById('batch-progress').style.display = 'none';
+      showMessage('일괄 생성이 완료되었습니다.', 'success');
+      return;
+    }
+    
+    const studentIndex = filledObservations[completed];
+    const originalCallback = window.handleBatchGenerationResult;
+    
+    // Override callback to continue with next student
+    window.handleBatchGenerationResult = function(index, result, success) {
+      originalCallback(index, result, success);
+      completed++;
+      updateBatchProgress(completed, filledObservations.length);
+      
+      // Continue with next student after a short delay
+      setTimeout(generateNext, 1000);
+    };
+    
+    generateSingleBatch(studentIndex);
+  }
+  
+  generateNext();
+}
+
+// Update batch progress
+function updateBatchProgress(completed, total) {
+  const progressFill = document.getElementById('progress-fill');
+  const progressText = document.getElementById('progress-text');
+  
+  const percentage = total > 0 ? (completed / total) * 100 : 0;
+  progressFill.style.width = `${percentage}%`;
+  progressText.textContent = `${completed} / ${total} 완료`;
+}
+
+// Export batch results
+function exportBatchResults() {
+  const hasResults = Object.keys(batchGenerationData.results).length > 0;
+  if (!hasResults) {
+    showMessage('내보낼 결과가 없습니다.', 'error');
+    return;
+  }
+  
+  // Create export modal
+  const modalOverlay = document.createElement('div');
+  modalOverlay.className = 'modal-overlay active';
+  modalOverlay.id = 'export-modal';
+  
+  const modalContent = document.createElement('div');
+  modalContent.className = 'modal-content export-modal';
+  
+  modalContent.innerHTML = `
+    <div class="modal-header">
+      <h2>결과 내보내기</h2>
+      <button class="modal-close" onclick="closeExportModal()">
+        <i class="material-icons">close</i>
+      </button>
+    </div>
+    
+    <div class="modal-body">
+      <div class="export-options">
+        <label class="export-option" onclick="selectExportOption('text')">
+          <input type="radio" name="export-type" value="text" checked>
+          <div class="export-option-content">
+            <div class="export-option-title">텍스트 파일 (.txt)</div>
+            <div class="export-option-desc">각 학생별로 구분된 텍스트 파일로 다운로드</div>
+          </div>
+        </label>
+        
+        <label class="export-option" onclick="selectExportOption('csv')">
+          <input type="radio" name="export-type" value="csv">
+          <div class="export-option-content">
+            <div class="export-option-title">CSV 파일 (.csv)</div>
+            <div class="export-option-desc">엑셀에서 열 수 있는 표 형태로 다운로드</div>
+          </div>
+        </label>
+        
+        <label class="export-option" onclick="selectExportOption('copy')">
+          <input type="radio" name="export-type" value="copy">
+          <div class="export-option-content">
+            <div class="export-option-title">클립보드 복사</div>
+            <div class="export-option-desc">결과를 클립보드에 복사하여 다른 곳에 붙여넣기</div>
+          </div>
+        </label>
+      </div>
+    </div>
+    
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeExportModal()">취소</button>
+      <button class="btn btn-primary" onclick="executeExport()">내보내기</button>
+    </div>
+  `;
+  
+  modalOverlay.appendChild(modalContent);
+  document.body.appendChild(modalOverlay);
+}
+
+// Select export option
+function selectExportOption(type) {
+  document.querySelectorAll('.export-option').forEach(option => {
+    option.classList.remove('selected');
+  });
+  event.currentTarget.classList.add('selected');
+}
+
+// Execute export
+function executeExport() {
+  const selectedType = document.querySelector('input[name="export-type"]:checked').value;
+  
+  switch (selectedType) {
+    case 'text':
+      exportAsText();
+      break;
+    case 'csv':
+      exportAsCSV();
+      break;
+    case 'copy':
+      exportToClipboard();
+      break;
+  }
+  
+  closeExportModal();
+}
+
+// Export as text file
+function exportAsText() {
+  let content = `생기부 일괄 생성 결과\n`;
+  content += `항목: ${batchGenerationData.recordType}\n`;
+  if (batchGenerationData.subject) {
+    content += `과목: ${batchGenerationData.subject}\n`;
+  }
+  if (batchGenerationData.activityType) {
+    content += `활동: ${batchGenerationData.activityType}\n`;
+  }
+  content += `학급: ${batchGenerationData.className}\n`;
+  content += `생성일: ${new Date().toLocaleDateString()}\n\n`;
+  content += `${'='.repeat(50)}\n\n`;
+  
+  Object.keys(batchGenerationData.results).forEach(studentIndex => {
+    const student = batchGenerationData.students[studentIndex];
+    const result = batchGenerationData.results[studentIndex];
+    
+    content += `${student.name} (${student.number}번)\n`;
+    content += `${'-'.repeat(30)}\n`;
+    content += `${result}\n\n`;
+  });
+  
+  downloadTextFile(content, `생기부_${batchGenerationData.className}_${new Date().toISOString().split('T')[0]}.txt`);
+}
+
+// Export as CSV
+function exportAsCSV() {
+  let csv = '번호,이름,생기부내용\n';
+  
+  Object.keys(batchGenerationData.results).forEach(studentIndex => {
+    const student = batchGenerationData.students[studentIndex];
+    const result = batchGenerationData.results[studentIndex];
+    
+    // Escape CSV content
+    const escapedResult = `"${result.replace(/"/g, '""')}"`;
+    csv += `${student.number},${student.name},${escapedResult}\n`;
+  });
+  
+  downloadTextFile(csv, `생기부_${batchGenerationData.className}_${new Date().toISOString().split('T')[0]}.csv`);
+}
+
+// Export to clipboard
+function exportToClipboard() {
+  let content = '';
+  
+  Object.keys(batchGenerationData.results).forEach(studentIndex => {
+    const student = batchGenerationData.students[studentIndex];
+    const result = batchGenerationData.results[studentIndex];
+    
+    content += `${student.name}: ${result}\n\n`;
+  });
+  
+  navigator.clipboard.writeText(content).then(() => {
+    showMessage('클립보드에 복사되었습니다.', 'success');
+  }).catch(() => {
+    showMessage('복사에 실패했습니다.', 'error');
+  });
+}
+
+// Download text file
+function downloadTextFile(content, filename) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  
+  showMessage('파일이 다운로드되었습니다.', 'success');
+}
+
+// Close export modal
+function closeExportModal() {
+  const modal = document.getElementById('export-modal');
+  if (modal) {
+    modal.remove();
+  }
+}
+
+// Reset batch generation
+function resetBatchGeneration() {
+  if (!confirm('일괄 생성을 초기화하시겠습니까? 모든 작성 내용이 삭제됩니다.')) {
+    return;
+  }
+  
+  // Reset data
+  batchGenerationData.results = {};
+  
+  // Clear table
+  const tableBody = document.getElementById('batch-table-body');
+  tableBody.querySelectorAll('.observation-input').forEach(input => {
+    input.value = '';
+  });
+  
+  tableBody.querySelectorAll('[id^="result-"]').forEach(resultDiv => {
+    resultDiv.innerHTML = '<div class="result-empty">생성 버튼을 클릭하세요</div>';
+  });
+  
+  // Hide progress
+  document.getElementById('batch-progress').style.display = 'none';
+  
+  showMessage('일괄 생성이 초기화되었습니다.', 'success');
+}
+
+// School Code Management Functions
+function loadUserGroups() {
+  showLoading('그룹 목록을 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        displayUserGroups(result.data);
+      } else {
+        showMessage('그룹 목록을 불러오는데 실패했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      showMessage('서버 오류가 발생했습니다: ' + error, 'error');
+    })
+    .getUserGroups();
+}
+
+function displayUserGroups(groups) {
+  const myGroupsList = document.getElementById('my-groups-list');
+  const joinedGroupsList = document.getElementById('joined-groups-list');
+  
+  // Clear existing content
+  myGroupsList.innerHTML = '';
+  joinedGroupsList.innerHTML = '';
+  
+  const myGroups = groups.filter(group => group.isCreator);
+  const joinedGroups = groups.filter(group => !group.isCreator);
+  
+  // Display my groups
+  if (myGroups.length === 0) {
+    myGroupsList.innerHTML = `
+      <div class="empty-groups-message">
+        <i class="material-icons">group</i>
+        <p>생성한 그룹이 없습니다.</p>
+        <p>새 그룹을 생성하여 동료 선생님들과 협업하세요.</p>
+      </div>
+    `;
+  } else {
+    myGroups.forEach(group => {
+      myGroupsList.appendChild(createGroupCard(group, true));
+    });
+  }
+  
+  // Display joined groups
+  if (joinedGroups.length === 0) {
+    joinedGroupsList.innerHTML = `
+      <div class="empty-groups-message">
+        <i class="material-icons">group_add</i>
+        <p>참여 중인 그룹이 없습니다.</p>
+        <p>학교 코드를 입력하여 그룹에 참가하세요.</p>
+      </div>
+    `;
+  } else {
+    joinedGroups.forEach(group => {
+      joinedGroupsList.appendChild(createGroupCard(group, false));
+    });
+  }
+}
+
+function createGroupCard(group, isCreator) {
+  const card = document.createElement('div');
+  card.className = 'group-card';
+  card.onclick = () => showGroupDetails(group.code);
+  
+  const memberCount = group.members ? group.members.length : 0;
+  const planCount = group.sharedPlans || 0;
+  
+  card.innerHTML = `
+    <div class="group-card-header">
+      <h4 class="group-card-title">${escapeHtml(group.groupName)}</h4>
+      <span class="group-code">${group.code}</span>
+    </div>
+    
+    <div class="group-card-description">
+      ${escapeHtml(group.description)}
+    </div>
+    
+    <div class="group-card-meta">
+      <div class="group-meta-item">
+        <i class="material-icons">school</i>
+        ${escapeHtml(group.schoolName)}
+      </div>
+      ${group.targetGrade ? `<div class="group-meta-item">
+        <i class="material-icons">grade</i>
+        ${escapeHtml(group.targetGrade)}
+      </div>` : ''}
+      ${group.primarySubject ? `<div class="group-meta-item">
+        <i class="material-icons">subject</i>
+        ${escapeHtml(group.primarySubject)}
+      </div>` : ''}
+    </div>
+    
+    <div class="group-card-stats">
+      <div class="group-stats-item">
+        <span class="group-stats-number">${memberCount}</span>
+        <span class="group-stats-label">구성원</span>
+      </div>
+      <div class="group-stats-item">
+        <span class="group-stats-number">${planCount}</span>
+        <span class="group-stats-label">공유계획</span>
+      </div>
+      <div class="group-stats-item">
+        <span class="group-stats-number">${formatDate(group.createdAt)}</span>
+        <span class="group-stats-label">생성일</span>
+      </div>
+    </div>
+    
+    <div class="group-card-actions" onclick="event.stopPropagation()">
+      <button class="group-action-btn" onclick="copyGroupCode('${group.code}')">
+        <i class="material-icons">content_copy</i>
+        코드 복사
+      </button>
+      ${isCreator ? `
+        <button class="group-action-btn" onclick="manageGroup('${group.code}')">
+          <i class="material-icons">settings</i>
+          관리
+        </button>
+      ` : `
+        <button class="group-action-btn danger" onclick="leaveGroup('${group.code}')">
+          <i class="material-icons">exit_to_app</i>
+          탈퇴
+        </button>
+      `}
+    </div>
+  `;
+  
+  return card;
+}
+
+function showCreateGroupModal() {
+  document.getElementById('create-group-modal').style.display = 'flex';
+  document.getElementById('group-name').focus();
+}
+
+function createGroup() {
+  const groupName = document.getElementById('group-name').value.trim();
+  const description = document.getElementById('group-description').value.trim();
+  const schoolName = document.getElementById('group-school').value.trim();
+  const targetGrade = document.getElementById('group-grade').value;
+  const primarySubject = document.getElementById('group-subject').value;
+  
+  if (!groupName || !description || !schoolName) {
+    showMessage('그룹 이름, 설명, 학교명은 필수 입력 항목입니다.', 'warning');
+    return;
+  }
+  
+  const groupData = {
+    groupName,
+    description,
+    schoolName,
+    targetGrade,
+    primarySubject
+  };
+  
+  showLoading('그룹을 생성하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        closeModal('create-group-modal');
+        document.getElementById('create-group-form').reset();
+        showMessage(`그룹이 생성되었습니다! 학교 코드: ${result.data.code}`, 'success');
+        loadUserGroups(); // Refresh group list
+      } else {
+        showMessage('그룹 생성에 실패했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      showMessage('서버 오류가 발생했습니다: ' + error, 'error');
+    })
+    .createSchoolCode(groupData);
+}
+
+function joinGroup() {
+  const code = document.getElementById('join-code-input').value.trim().toUpperCase();
+  
+  if (!code || code.length !== 6) {
+    showMessage('올바른 6자리 학교 코드를 입력하세요.', 'warning');
+    return;
+  }
+  
+  showLoading('그룹에 참가하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        document.getElementById('join-code-input').value = '';
+        showMessage('그룹 참가가 완료되었습니다!', 'success');
+        loadUserGroups(); // Refresh group list
+      } else {
+        showMessage('그룹 참가에 실패했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      showMessage('서버 오류가 발생했습니다: ' + error, 'error');
+    })
+    .joinSchoolCode(code);
+}
+
+function leaveGroup(code) {
+  if (!confirm('정말로 이 그룹을 탈퇴하시겠습니까?')) {
+    return;
+  }
+  
+  showLoading('그룹에서 탈퇴하는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        showMessage('그룹 탈퇴가 완료되었습니다.', 'success');
+        loadUserGroups(); // Refresh group list
+      } else {
+        showMessage('그룹 탈퇴에 실패했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      showMessage('서버 오류가 발생했습니다: ' + error, 'error');
+    })
+    .leaveSchoolCode(code);
+}
+
+function copyGroupCode(code) {
+  navigator.clipboard.writeText(code).then(function() {
+    showMessage('학교 코드가 클립보드에 복사되었습니다: ' + code, 'success');
+  }).catch(function(err) {
+    // Fallback for older browsers
+    const textArea = document.createElement('textarea');
+    textArea.value = code;
+    document.body.appendChild(textArea);
+    textArea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textArea);
+    showMessage('학교 코드가 복사되었습니다: ' + code, 'success');
+  });
+}
+
+function showGroupDetails(code) {
+  showLoading('그룹 정보를 불러오는 중...');
+  
+  google.script.run
+    .withSuccessHandler(function(result) {
+      hideLoading();
+      if (result.success) {
+        displayGroupDetails(result.data);
+      } else {
+        showMessage('그룹 정보를 불러오는데 실패했습니다: ' + result.error, 'error');
+      }
+    })
+    .withFailureHandler(function(error) {
+      hideLoading();
+      showMessage('서버 오류가 발생했습니다: ' + error, 'error');
+    })
+    .getGroupDetails(code);
+}
+
+function displayGroupDetails(group) {
+  const modal = document.getElementById('group-details-modal');
+  const title = document.getElementById('group-details-title');
+  const content = document.getElementById('group-details-content');
+  
+  title.textContent = group.groupName;
+  
+  const memberCount = group.members ? group.members.length : 0;
+  const planCount = group.sharedPlans || 0;
+  
+  content.innerHTML = `
+    <div class="group-details-section">
+      <h3><i class="material-icons">info</i> 그룹 정보</h3>
+      <div class="group-info-grid">
+        <div class="group-info-item">
+          <div class="group-info-label">그룹명</div>
+          <div class="group-info-value">${escapeHtml(group.groupName)}</div>
+        </div>
+        <div class="group-info-item">
+          <div class="group-info-label">학교 코드</div>
+          <div class="group-info-value">${group.code}</div>
+        </div>
+        <div class="group-info-item">
+          <div class="group-info-label">학교명</div>
+          <div class="group-info-value">${escapeHtml(group.schoolName)}</div>
+        </div>
+        <div class="group-info-item">
+          <div class="group-info-label">대상 학년</div>
+          <div class="group-info-value">${group.targetGrade || '전체 학년'}</div>
+        </div>
+        <div class="group-info-item">
+          <div class="group-info-label">주요 과목</div>
+          <div class="group-info-value">${group.primarySubject || '전체 과목'}</div>
+        </div>
+        <div class="group-info-item">
+          <div class="group-info-label">생성일</div>
+          <div class="group-info-value">${formatDate(group.createdAt)}</div>
+        </div>
+      </div>
+      
+      <div class="group-info-item">
+        <div class="group-info-label">그룹 설명</div>
+        <div class="group-info-value">${escapeHtml(group.description)}</div>
+      </div>
+    </div>
+    
+    <div class="group-details-section">
+      <h3><i class="material-icons">people</i> 구성원 (${memberCount}명)</h3>
+      <div class="member-list">
+        ${group.members ? group.members.map(member => `
+          <div class="member-item">
+            <div class="member-avatar">${getInitials(member.name || member.email)}</div>
+            <div class="member-info">
+              <div class="member-name">${escapeHtml(member.name || member.email.split('@')[0])}</div>
+              <div class="member-email">${escapeHtml(member.email)}</div>
+            </div>
+            <div class="member-role ${member.isCreator ? 'creator' : ''}">
+              ${member.isCreator ? '그룹장' : '구성원'}
+            </div>
+          </div>
+        `).join('') : '<p>구성원 정보를 불러올 수 없습니다.</p>'}
+      </div>
+    </div>
+    
+    <div class="group-details-section">
+      <h3><i class="material-icons">assignment</i> 공유된 평가계획 (${planCount}개)</h3>
+      <p>공유된 평가계획은 평가계획 페이지에서 확인할 수 있습니다.</p>
+    </div>
+  `;
+  
+  modal.style.display = 'flex';
+}
+
+function manageGroup(code) {
+  // TODO: Implement group management functionality
+  showMessage('그룹 관리 기능은 추후 추가될 예정입니다.', 'info');
+}
+
+function getInitials(name) {
+  if (!name) return '?';
+  if (name.includes('@')) {
+    return name.charAt(0).toUpperCase();
+  }
+  return name.split(' ').map(part => part.charAt(0)).join('').toUpperCase().substring(0, 2);
+}
+
+function formatDate(dateString) {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+  return date.toLocaleDateString('ko-KR', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  });
+}
+
+// Load groups when settings page is opened
+document.addEventListener('DOMContentLoaded', function() {
+  // Add navigation listener for settings page
+  const settingsNavLink = document.querySelector('[data-page="settings"]');
+  if (settingsNavLink) {
+    settingsNavLink.addEventListener('click', function() {
+      // Load groups when settings page is opened
+      setTimeout(loadUserGroups, 100);
+    });
+  }
+});
+</script>
