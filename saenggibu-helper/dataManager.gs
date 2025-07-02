@@ -1296,6 +1296,14 @@ function createGoogleForm(surveyData) {
     // Add description
     form.setDescription(`${surveyData.subject} 수업에 대한 자기평가입니다. 솔직하게 답변해주세요.`);
     
+    // Configure form settings for public access
+    form.setRequireSignIn(false);           // 로그인 불필요 설정
+    form.setLimitOneResponsePerUser(false); // 중복 응답 허용 (같은 기기에서 여러 학생 가능)
+    form.setAcceptingResponses(true);       // 응답 수집 활성화
+    form.setAllowResponseEdits(false);      // 응답 수정 비허용 (데이터 무결성)
+    form.setCollectEmail(false);            // 이메일 수집 비활성화 (익명성 보장)
+    form.setPublishingSummary(false);       // 응답 요약 공개 비활성화
+    
     // Store metadata in form description (hidden)
     const metadata = {
       subject: surveyData.subject,
